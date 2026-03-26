@@ -700,7 +700,9 @@ def webhook():
     if TWILIO_AUTH_TOKEN:
         validator = RequestValidator(TWILIO_AUTH_TOKEN)
         signature = request.headers.get("X-Twilio-Signature", "")
-        if not validator.validate(request.url, request.form, signature):
+        # Use public URL for validation (Railway proxies HTTPS → HTTP internally)
+        url = BASE_URL + "/webhook" if BASE_URL else request.url
+        if not validator.validate(url, request.form, signature):
             log.warning(f"Invalid Twilio signature from {request.remote_addr}")
             return "Forbidden", 403
 

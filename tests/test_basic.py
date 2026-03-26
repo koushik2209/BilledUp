@@ -47,6 +47,13 @@ def test_calculate_bill_no_api_client():
     assert br.grand_total > br.subtotal
 
 
+def test_calculate_bill_does_not_mutate_input():
+    items = [BillItem("phone case", 1, 299)]
+    calculate_bill(items, gst_client=None)
+    assert items[0].name == "phone case"  # not title-cased
+    assert items[0].hsn == ""  # unchanged
+
+
 def test_main_database_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(bg, "INVOICE_REGISTRY_FILE", str(tmp_path / "registry.json"))
     main.init_database()

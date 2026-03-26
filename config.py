@@ -16,13 +16,13 @@ PLATFORM_SUPPORT  = os.getenv("PLATFORM_SUPPORT_PHONE", "+91 99999 99999")
 DATABASE_URL      = os.getenv("DATABASE_URL", "sqlite:///billeasy.db")
 
 # ── App ──
-DEBUG             = os.getenv("DEBUG", "True") == "True"
+DEBUG             = os.getenv("DEBUG", "False") == "True"
 PORT              = int(os.getenv("PORT", 5000))
 
 # ── Bill settings ──
 BILL_PREFIX       = "INV"
 BILL_YEAR         = "2026"
-BILLS_FOLDER      = "bills"
+BILLS_FOLDER      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bills")
 
 # ── Validate on startup ──
 if not ANTHROPIC_API_KEY:
@@ -61,6 +61,21 @@ TWILIO_ACCOUNT_SID     = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN      = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
 BILLEASY_WHATSAPP_NUMBER = os.getenv("BILLEASY_WHATSAPP_NUMBER")
+
+# ── Public base URL ──
+BASE_URL = os.getenv("BASE_URL", "https://web-production-91c36.up.railway.app")
+
+
+# ── Lazy Anthropic client singleton ──
+_anthropic_client = None
+
+def get_anthropic_client():
+    """Return a shared Anthropic client instance (created on first call)."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _anthropic_client
 
 
 if __name__ == "__main__":

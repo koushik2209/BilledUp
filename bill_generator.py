@@ -2,7 +2,7 @@
 bill_generator.py
 BillEasy - Production Grade GST Bill Generator
 """
-import os, re, json, logging
+import os, re, json, logging, threading
 from datetime import datetime
 from dataclasses import dataclass
 from reportlab.lib.pagesizes import A4
@@ -24,6 +24,7 @@ WHITE       = colors.white
 BLACK       = colors.black
 VALID_GST_SLABS = {0, 5, 12, 18, 28}
 GSTIN_REGEX = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$")
+PLACEHOLDER_GSTIN = "GSTIN00000000000"
 
 # A4 usable width = 210mm - 14mm left - 14mm right = 182mm
 PAGE_W = 182 * mm
@@ -66,7 +67,7 @@ class ShopProfile:
             raise ValueError("Shop name cannot be empty")
         if not self.address.strip():
             raise ValueError("Shop address cannot be empty")
-        if self.gstin and not self.gstin.startswith("GSTIN"):
+        if self.gstin and self.gstin != PLACEHOLDER_GSTIN:
             if not GSTIN_REGEX.match(self.gstin.upper().strip()):
                 raise ValueError(f"Invalid GSTIN format: '{self.gstin}'. Expected: 22AAAAA0000A1Z5")
         if len(re.sub(r"\D", "", self.phone)) < 10:
@@ -95,14 +96,18 @@ class BillResult:
     grand_total: float
     in_words:    str
 
-INVOICE_REGISTRY_FILE = "invoice_registry.json"
+INVOICE_REGISTRY_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "invoice_registry.json"
+)
+
+_invoice_lock = threading.Lock()
 
 def _load_registry() -> dict:
     if os.path.exists(INVOICE_REGISTRY_FILE):
         try:
             with open(INVOICE_REGISTRY_FILE, "r") as f:
                 return json.load(f)
-        except Exception as e:
+        except (json.JSONDecodeError, IOError) as e:
             log.error(f"Registry read error: {e} - starting fresh")
     return {}
 
@@ -115,13 +120,14 @@ def _save_registry(registry: dict):
 def generate_invoice_number(shop_id: str) -> str:
     if not shop_id.strip():
         raise ValueError("shop_id cannot be empty")
-    shop_key = shop_id.upper().strip()
-    year     = datetime.now().strftime("%Y")
-    registry = _load_registry()
-    key      = f"{shop_key}_{year}"
-    sequence = registry.get(key, 0) + 1
-    registry[key] = sequence
-    _save_registry(registry)
+    with _invoice_lock:
+        shop_key = shop_id.upper().strip()
+        year     = datetime.now().strftime("%Y")
+        registry = _load_registry()
+        key      = f"{shop_key}_{year}"
+        sequence = registry.get(key, 0) + 1
+        registry[key] = sequence
+        _save_registry(registry)
     invoice_no = f"INV-{year}-{shop_key}-{sequence:05d}"
     log.info(f"Generated invoice: {invoice_no}")
     return invoice_no
@@ -186,14 +192,11 @@ def calculate_bill(items: list, gst_client=None) -> BillResult:
         total   = round(amount + gst_amt, 2)
         subtotal += amount
 
-        item.hsn      = hsn
-        item.gst_rate = gst_rate
-        item.amount   = amount
-        item.cgst     = cgst
-        item.sgst     = sgst
-        item.total    = total
-        item.name     = name.title()
-        processed.append(item)
+        processed.append(BillItem(
+            name=name.title(), qty=qty, price=price,
+            hsn=hsn, gst_rate=gst_rate, amount=amount,
+            cgst=cgst, sgst=sgst, total=total,
+        ))
 
     subtotal    = round(subtotal, 2)
     total_cgst  = round(sum(i.cgst for i in processed), 2)
@@ -235,7 +238,7 @@ def generate_pdf_bill(
     invoice_number: str,
     gst_client=None,
     save_path:      str | None = None,
-) -> str:
+) -> tuple[str, BillResult]:
     log.info(f"Generating bill {invoice_number} for {shop.name}")
     shop.validate()
     customer.validate()
@@ -463,7 +466,7 @@ def generate_pdf_bill(
     log.info(f"Bill saved: {abs_path} ({size_kb:.1f} KB)")
     if size_kb > 500:
         log.warning(f"Bill is {size_kb:.0f}KB - may be slow on WhatsApp")
-    return abs_path
+    return abs_path, bill
 
 
 # ── Unit tests ──
@@ -550,8 +553,9 @@ if __name__ == "__main__":
         BillItem("power bank",     qty=1, price=899),
     ]
     invoice_number = generate_invoice_number(shop.shop_id)
-    path = generate_pdf_bill(
+    path, bill_result = generate_pdf_bill(
         shop=shop, customer=customer, items=items,
         invoice_number=invoice_number, gst_client=client,
     )
     print(f"\nSuccess! Open your bill here:\n  {path}")
+    print(f"Grand total: Rs.{bill_result.grand_total:.2f}")

@@ -22,7 +22,7 @@ from collections import deque
 import anthropic
 from anthropic.types import TextBlock
 
-from config import ANTHROPIC_API_KEY
+from config import get_anthropic_client
  
 log = logging.getLogger("billeasy.parser")
  
@@ -73,8 +73,6 @@ class RateLimiter:
  
 _rate_limiter = RateLimiter(RATE_LIMIT_CALLS, RATE_LIMIT_WINDOW)
  
-# ── Claude client ──
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
  
 # ── System prompt ──
 SYSTEM_PROMPT = """You are a GST billing assistant for Indian retail shops.
@@ -303,7 +301,7 @@ def parse_message(message: str) -> dict:
                 log.info(f"Retry {attempt}/{MAX_RETRIES} after {delay}s")
                 time.sleep(delay)
  
-            response = _client.messages.create(
+            response = get_anthropic_client().messages.create(
                 model      = "claude-sonnet-4-20250514",
                 max_tokens = 600,
                 system     = SYSTEM_PROMPT,

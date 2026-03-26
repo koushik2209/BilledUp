@@ -9,6 +9,7 @@ Features:
 - 10 day free trial tracking
 - Bill generation pipeline
 - Bill history and daily summary
+- Twilio request signature validation
 - Graceful error handling
 """
 
@@ -17,28 +18,28 @@ import re
 import logging
 from datetime import datetime, timedelta
 from flask import Flask, request
-from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.request_validator import RequestValidator
 
 from config import (
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
     TWILIO_WHATSAPP_NUMBER,
-    ANTHROPIC_API_KEY,
     PLATFORM_NAME,
+    BASE_URL,
+    get_anthropic_client,
 )
 from claude_parser import parse_message
 from bill_generator import (
     ShopProfile, CustomerInfo, BillItem,
     generate_invoice_number, generate_pdf_bill,
-    calculate_bill,
+    PLACEHOLDER_GSTIN,
 )
 from main import (
     init_database, seed_demo_shop,
     get_shop, save_bill,
     get_today_summary,
 )
-import anthropic
 import sqlite3
 from contextlib import contextmanager
 
@@ -50,10 +51,22 @@ logging.basicConfig(
 )
 log = logging.getLogger("billeasy.whatsapp")
 
-# ── Flask + Twilio ──
-app          = Flask(__name__)
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# ── Flask ──
+app = Flask(__name__)
+
+# ── Lazy Twilio client (avoids crash when creds are missing) ──
+_twilio_client = None
+
+def get_twilio_client():
+    global _twilio_client
+    if _twilio_client is None:
+        if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+            raise RuntimeError(
+                "TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set"
+            )
+        from twilio.rest import Client
+        _twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    return _twilio_client
 
 # ── Database ──
 from config import DATABASE_URL
@@ -67,7 +80,7 @@ def db():
     try:
         yield conn
         conn.commit()
-    except Exception as e:
+    except Exception:
         conn.rollback()
         raise
     finally:
@@ -126,18 +139,28 @@ def get_registration(phone: str) -> dict | None:
         return dict(row) if row else None
 
 
+ALLOWED_REG_COLUMNS = {
+    "phone", "shop_name", "address", "gstin", "state",
+    "trial_start", "trial_end", "active", "bills_count", "updated_at",
+}
+
 def upsert_registration(phone: str, **fields):
-    """Create or update a registration record."""
+    """Create or update a registration record (column-name whitelist enforced)."""
     fields["updated_at"] = datetime.now().isoformat()
+
+    for key in fields:
+        if key not in ALLOWED_REG_COLUMNS:
+            raise ValueError(f"Invalid registration field: {key}")
+
     existing = get_registration(phone)
 
     with db() as conn:
         if not existing:
             fields["phone"] = phone
             cols = ", ".join(fields.keys())
-            vals = ", ".join(["?" for _ in fields])
+            placeholders = ", ".join(["?" for _ in fields])
             conn.execute(
-                f"INSERT INTO registrations ({cols}) VALUES ({vals})",
+                f"INSERT INTO registrations ({cols}) VALUES ({placeholders})",
                 list(fields.values())
             )
         else:
@@ -201,7 +224,7 @@ def activate_trial(phone: str, shop_name: str, address: str, gstin: str = ""):
                 shop_id,
                 shop_name,
                 address,
-                gstin or "GSTIN00000000000",
+                gstin or PLACEHOLDER_GSTIN,
                 phone.replace("whatsapp:", ""),
                 "",
                 "Telangana",
@@ -364,7 +387,7 @@ def msg_bill_summary(bill_result, invoice_number: str, customer_name: str, days:
         f"━━━━━━━━━━━━━━━━━",
         f"*TOTAL: Rs.{bill_result.grand_total:.2f}*\n",
         f"_{bill_result.in_words}_\n",
-        f"📄 PDF saved. Forward invoice number to customer.",
+        f"📄 PDF attached below. Forward to customer.",
         f"Trial days left: {days}",
         f"\n_{PLATFORM_NAME}_",
     ]
@@ -411,9 +434,9 @@ def is_valid_gstin(gstin: str) -> bool:
 # ════════════════════════════════════════════════
 
 def send(to: str, body: str):
-    """Send WhatsApp message."""
+    """Send WhatsApp message via Twilio."""
     try:
-        twilio_client.messages.create(
+        get_twilio_client().messages.create(
             from_ = TWILIO_WHATSAPP_NUMBER,
             to    = to,
             body  = body,
@@ -422,6 +445,34 @@ def send(to: str, body: str):
         log.info(f"Sent to {to} ({len(body)} chars)")
     except Exception as e:
         log.error(f"Send failed to {to}: {e}")
+
+
+def send_pdf(to: str, pdf_path: str, caption: str = ""):
+    """Send a PDF bill as a WhatsApp media message via Twilio.
+
+    Requires BASE_URL (NGROK_URL) to be set so Twilio can fetch the file.
+    Falls back to a text-only notice if BASE_URL is not configured.
+    """
+    filename = os.path.basename(pdf_path)
+
+    if not BASE_URL:
+        log.warning("BASE_URL not set — cannot send PDF media. Sending text fallback.")
+        send(to, f"📄 Your bill PDF is ready: {filename}\n(Ask shop to share the file)")
+        return
+
+    media_url = f"{BASE_URL}/bills/{filename}"
+    try:
+        get_twilio_client().messages.create(
+            from_     = TWILIO_WHATSAPP_NUMBER,
+            to        = to,
+            body      = caption or f"📄 Invoice: {filename}",
+            media_url = [media_url],
+        )
+        log_message(to, "OUT", f"[PDF] {media_url}")
+        log.info(f"PDF sent to {to}: {media_url}")
+    except Exception as e:
+        log.error(f"PDF send failed to {to}: {e}")
+        send(to, f"📄 Your bill PDF is ready but could not be attached.\nFilename: {filename}")
 
 
 # ════════════════════════════════════════════════
@@ -552,7 +603,7 @@ def handle_message(from_number: str, message: str):
                     shop_id    = shop_id,
                     name       = reg.get("shop_name", "Shop"),
                     address    = reg.get("address", "Hyderabad"),
-                    gstin      = reg.get("gstin") or "GSTIN00000000000",
+                    gstin      = reg.get("gstin") or PLACEHOLDER_GSTIN,
                     phone      = from_number.replace("whatsapp:", ""),
                     state      = "Telangana",
                     state_code = "36",
@@ -566,18 +617,15 @@ def handle_message(from_number: str, message: str):
                 for i in parsed["items"]
             ]
 
-            # Generate invoice and PDF
+            # Generate invoice and PDF (returns path + BillResult)
             invoice_number = generate_invoice_number(shop_id)
-            pdf_path = generate_pdf_bill(
+            pdf_path, bill_result = generate_pdf_bill(
                 shop           = shop,
                 customer       = customer,
                 items          = items,
                 invoice_number = invoice_number,
-                gst_client     = claude_client,
+                gst_client     = get_anthropic_client(),
             )
-
-            # Get bill result
-            bill_result = calculate_bill(items, claude_client)
 
             # Save to database
             try:
@@ -586,7 +634,7 @@ def handle_message(from_number: str, message: str):
                     invoice_number = invoice_number,
                     customer_name  = parsed["customer_name"],
                     customer_phone = from_number,
-                    items          = items,
+                    items          = bill_result.items,
                     bill_result    = bill_result,
                     pdf_path       = pdf_path,
                     raw_message    = message,
@@ -601,7 +649,7 @@ def handle_message(from_number: str, message: str):
                 bills_count=reg.get("bills_count", 0) + 1
             )
 
-            # Send bill summary
+            # Send bill summary + PDF
             summary = msg_bill_summary(
                 bill_result    = bill_result,
                 invoice_number = invoice_number,
@@ -609,6 +657,13 @@ def handle_message(from_number: str, message: str):
                 days           = d_left,
             )
             send(from_number, summary)
+
+            # Send PDF as media attachment
+            send_pdf(
+                to       = from_number,
+                pdf_path = pdf_path,
+                caption  = f"📄 Invoice {invoice_number} — Rs.{bill_result.grand_total:.2f}",
+            )
 
             log.info(
                 f"Bill generated: {invoice_number} "
@@ -641,6 +696,14 @@ def handle_message(from_number: str, message: str):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """Main WhatsApp webhook — receives all incoming messages."""
+    # Validate Twilio request signature
+    if TWILIO_AUTH_TOKEN:
+        validator = RequestValidator(TWILIO_AUTH_TOKEN)
+        signature = request.headers.get("X-Twilio-Signature", "")
+        if not validator.validate(request.url, request.form, signature):
+            log.warning(f"Invalid Twilio signature from {request.remote_addr}")
+            return "Forbidden", 403
+
     incoming_msg = request.values.get("Body", "").strip()
     from_number  = request.values.get("From", "")
     num_media    = int(request.values.get("NumMedia", 0))
@@ -680,7 +743,9 @@ def health():
 
 @app.route("/bills/<filename>", methods=["GET"])
 def serve_bill(filename):
-    """Serve PDF bills."""
+    """Serve PDF bills (validated filename)."""
+    if not re.match(r'^[\w\-]+\.pdf$', filename):
+        return {"error": "Invalid filename"}, 400
     from flask import send_from_directory
     from config import BILLS_FOLDER
     try:
@@ -752,4 +817,4 @@ if __name__ == "__main__":
     print("="*55 + "\n")
 
     port = int(os.environ.get("PORT", 5000))
-app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)

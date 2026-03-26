@@ -20,11 +20,10 @@ import logging
 import sqlite3
 from datetime import datetime
 from contextlib import contextmanager
-import anthropic
- 
 from config import (
     ANTHROPIC_API_KEY, PLATFORM_NAME,
-    PLATFORM_TAGLINE, DATABASE_URL, DEBUG
+    PLATFORM_TAGLINE, DATABASE_URL, DEBUG,
+    get_anthropic_client,
 )
 from claude_parser import parse_message, format_result
 from bill_generator import (
@@ -41,8 +40,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("billeasy.main")
  
-# ── Claude client ──
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
  
  
 # ════════════════════════════════════════════════
@@ -296,17 +293,6 @@ def validate_environment() -> bool:
     except Exception as e:
         issues.append(f"Database error: {e}")
  
-    # Check Claude API reachable (quick test)
-    try:
-        test = _client.messages.create(
-            model      = "claude-sonnet-4-20250514",
-            max_tokens = 10,
-            messages   = [{"role": "user", "content": "hi"}]
-        )
-        print("  Claude API    OK")
-    except Exception as e:
-        issues.append(f"Claude API unreachable: {e}")
- 
     if issues:
         print("\nStartup failed:")
         for issue in issues:
@@ -383,12 +369,12 @@ def generate_bill_from_message(
     # ── Step 3: Generate PDF ──
     try:
         invoice_number = generate_invoice_number(shop.shop_id)
-        pdf_path       = generate_pdf_bill(
+        pdf_path, bill_result = generate_pdf_bill(
             shop           = shop,
             customer       = customer,
             items          = items,
             invoice_number = invoice_number,
-            gst_client     = _client,
+            gst_client     = get_anthropic_client(),
         )
     except Exception as e:
         log.error(f"PDF generation failed: {e}")
@@ -398,18 +384,14 @@ def generate_bill_from_message(
             "stage":   "pdf_generation",
         }
  
-    # ── Step 4: Get bill result for DB ──
-    from bill_generator import calculate_bill
-    bill_result = calculate_bill(items, _client)
- 
-    # ── Step 5: Save to database ──
+    # ── Step 4: Save to database ──
     try:
         save_bill(
             shop_id        = shop.shop_id,
             invoice_number = invoice_number,
             customer_name  = parsed["customer_name"],
             customer_phone = "",
-            items          = items,
+            items          = bill_result.items,
             bill_result    = bill_result,
             pdf_path       = pdf_path,
             raw_message    = message,

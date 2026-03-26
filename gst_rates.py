@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import anthropic
 
 CACHE_FILE = "gst_cache.json"
@@ -276,18 +277,26 @@ GST_RATES = {
 }
 
 
+_log = logging.getLogger("billeasy.gst")
+
+
 def load_cache():
     """Load previously Claude-found items from cache file."""
     if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            _log.warning(f"GST cache corrupted, starting fresh: {e}")
     return {}
 
 
 def save_cache(cache):
-    """Save newly found items to cache file."""
-    with open(CACHE_FILE, "w") as f:
+    """Save newly found items to cache file — atomic write."""
+    tmp = CACHE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(cache, f, indent=2)
+    os.replace(tmp, CACHE_FILE)
 
 
 def get_gst_rate(item_name):
@@ -366,11 +375,11 @@ def get_gst_rate_smart(item_name, client=None):
                 return result
 
         except Exception as e:
-            print(f"Claude lookup failed for '{item_name}': {e}")
+            _log.warning(f"Claude lookup failed for '{item_name}': {e}")
 
     # Step 4 — last resort default
-    print(
-        f"Warning: Unknown item '{item_name}' — "
+    _log.warning(
+        f"Unknown item '{item_name}' — "
         f"using default 18%. Add manually to GST_RATES if needed."
     )
     return GST_RATES["default"]

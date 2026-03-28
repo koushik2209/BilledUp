@@ -28,10 +28,33 @@ _RETURN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ── Product phrases that look like return keywords but aren't ──
+# If the return keyword is part of one of these phrases, it's NOT a return.
+_FALSE_POSITIVE_PHRASES = [
+    "return gift", "gift pack", "back cover", "back case", "back panel",
+    "exchange offer", "money back", "buy back", "cash back", "cashback",
+    "back pain", "phone case",
+]
+_FALSE_POSITIVE_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(p) for p in _FALSE_POSITIVE_PHRASES) + r")\b",
+    re.IGNORECASE,
+)
+
 
 def _keyword_match(message: str) -> bool:
-    """Check if message contains return-related keywords (regex word-boundary)."""
-    return bool(_RETURN_PATTERN.search(message))
+    """Check if message contains return-related keywords (regex word-boundary).
+
+    Returns False if the matched keyword is part of a known product phrase
+    (e.g., "return gift", "back cover").
+    """
+    match = _RETURN_PATTERN.search(message)
+    if not match:
+        return False
+    # Check if a false-positive product phrase overlaps the keyword match
+    if _FALSE_POSITIVE_PATTERN.search(message):
+        log.debug(f"Return keyword '{match.group()}' overridden by product phrase in '{message[:60]}'")
+        return False
+    return True
 
 
 def _fuzzy_match(message: str) -> bool:
@@ -84,15 +107,21 @@ def detect_return_intent(message: str, parsed_items: list) -> bool:
     For mixed positive/negative items:
     - Only treat as return if majority are negative
 
+    Whitelist: product phrases like "return gift", "back cover" override
+    any keyword/fuzzy match to prevent false positives.
+
     Returns True if this should be a credit note.
     """
+    # Whitelist check: if message contains known product phrases, skip text-based detection
+    has_product_phrase = bool(_FALSE_POSITIVE_PATTERN.search(message))
+
     # Keyword match — strongest signal
-    if _keyword_match(message):
+    if not has_product_phrase and _keyword_match(message):
         log.info(f"Return detected: keyword match in '{message[:60]}'")
         return True
 
-    # Fuzzy match — catches typos like "retun", "refnd", "bak"
-    if _fuzzy_match(message):
+    # Fuzzy match — catches typos like "retun", "refnd"
+    if not has_product_phrase and _fuzzy_match(message):
         log.info(f"Return detected: fuzzy match in '{message[:60]}'")
         return True
 

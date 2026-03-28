@@ -217,6 +217,9 @@ def _regex_parse_message(message: str) -> dict:
             message = message[:cm.start()] + message[cm.end():]
             message = message.strip()
 
+    # ── Normalize symbols: @ and = to spaces so "shirt @ 500" works ──
+    message = re.sub(r'\s*[@=]\s*', ' ', message)
+
     items: list[dict] = []
     notes_parts: list[str] = []
 

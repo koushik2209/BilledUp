@@ -1373,3 +1373,59 @@ def test_state_match_rejects_short_input():
     result = resolve_state("Goa")
     assert result is not None
     assert result[0] == "Goa"
+
+
+# ════════════════════════════════════════════════
+# ROBUSTNESS FIXES — symbol normalization + whitelist
+# ════════════════════════════════════════════════
+
+def test_at_symbol_parsed():
+    """'shirt @ 500' should parse with @ normalized to space."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("shirt @ 500")
+    assert len(result["items"]) >= 1
+    assert result["items"][0]["name"].lower() == "shirt"
+    assert result["items"][0]["price"] == 500
+
+
+def test_equals_symbol_parsed():
+    """'shirt = 500' should parse with = normalized to space."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("shirt = 500")
+    assert len(result["items"]) >= 1
+    assert result["items"][0]["name"].lower() == "shirt"
+    assert result["items"][0]["price"] == 500
+
+
+def test_mixed_symbols_parsed():
+    """'shirt @ 500 pant = 700' should parse both items."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("shirt @ 500 pant = 700")
+    items = {i["name"].lower(): i for i in result["items"]}
+    assert "shirt" in items
+    assert items["shirt"]["price"] == 500
+    assert "pant" in items
+    assert items["pant"]["price"] == 700
+
+
+def test_return_gift_not_return():
+    """'return gift pack 200' should NOT trigger return (whitelist)."""
+    from return_detector import detect_return_intent
+    items = [{"name": "gift pack", "qty": 1, "price": 200}]
+    assert detect_return_intent("return gift pack 200", items) is False
+
+
+def test_genuine_return_still_works():
+    """'want to return shirt' should still trigger return despite whitelist."""
+    from return_detector import detect_return_intent
+    items = [{"name": "shirt", "qty": 1, "price": 500}]
+    assert detect_return_intent("want to return shirt 500", items) is True
+    assert detect_return_intent("return this shirt 500", items) is True
+
+
+def test_utensil_gst():
+    """Utensil/steel should have 12% GST."""
+    from gst_rates import get_gst_rate_smart
+    for item in ["utensil", "steel utensil", "steel"]:
+        rate = get_gst_rate_smart(item)
+        assert rate["gst"] == 12, f"{item} expected 12% got {rate['gst']}%"

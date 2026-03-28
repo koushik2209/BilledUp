@@ -8,12 +8,12 @@ load_dotenv()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 # ── Platform details ──
-PLATFORM_NAME     = os.getenv("PLATFORM_NAME",     "BillEasy")
+PLATFORM_NAME     = os.getenv("PLATFORM_NAME",     "BilledUp")
 PLATFORM_TAGLINE  = os.getenv("PLATFORM_TAGLINE",  "Bill smarter. Grow faster.")
 PLATFORM_SUPPORT  = os.getenv("PLATFORM_SUPPORT_PHONE", "+91 99999 99999")
 
 # ── Database ──
-DATABASE_URL      = os.getenv("DATABASE_URL", "sqlite:///billeasy.db")
+DATABASE_URL      = os.getenv("DATABASE_URL", "sqlite:///billedup.db")
 
 # ── App ──
 DEBUG             = os.getenv("DEBUG", "False") == "True"
@@ -21,7 +21,6 @@ PORT              = int(os.getenv("PORT", 5000))
 
 # ── Bill settings ──
 BILL_PREFIX       = "INV"
-BILL_YEAR         = "2026"
 BILLS_FOLDER      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bills")
 
 # ── Validate on startup ──
@@ -52,7 +51,6 @@ def get_config_summary():
         "debug": DEBUG,
         "port": PORT,
         "bill_prefix": BILL_PREFIX,
-        "bill_year": BILL_YEAR,
         "bills_folder": BILLS_FOLDER,
         "api_key_loaded": bool(ANTHROPIC_API_KEY),
     }
@@ -60,7 +58,6 @@ def get_config_summary():
 TWILIO_ACCOUNT_SID     = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN      = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
-BILLEASY_WHATSAPP_NUMBER = os.getenv("BILLEASY_WHATSAPP_NUMBER")
 
 # ── Public base URL ──
 BASE_URL = os.getenv("BASE_URL", "https://web-production-91c36.up.railway.app")

@@ -1,9 +1,10 @@
 import os
+import re
 import json
 import logging
-import anthropic
+from rapidfuzz import fuzz, process, utils
 
-CACHE_FILE = "gst_cache.json"
+CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gst_cache.json")
 
 GST_RATES = {
 
@@ -277,32 +278,103 @@ GST_RATES = {
 }
 
 
-_log = logging.getLogger("billeasy.gst")
+_log = logging.getLogger("billedup.gst")
+
+# ── Fuzzy matching ──
+FUZZY_THRESHOLD = 75  # minimum similarity score (0-100)
+_SEARCHABLE_KEYS = [k for k in GST_RATES if k != "default"]
+_FUZZY_CACHE_MAX = 10000  # cap to prevent unbounded memory growth
+_fuzzy_cache: dict[str, dict] = {}  # in-memory cache for fuzzy results
+
+
+def fuzzy_match(item_name: str) -> dict | None:
+    """Find best fuzzy match from GST_RATES using rapidfuzz.
+
+    Returns the matched rate dict or None if no good match found.
+    Results are cached in memory for repeated queries.
+    """
+    item_lower = item_name.lower().strip()
+
+    # Check in-memory cache first
+    if item_lower in _fuzzy_cache:
+        return _fuzzy_cache[item_lower]
+
+    # WRatio combines simple ratio, partial ratio, token sort, token set
+    # — picks the best strategy per comparison automatically
+    match = process.extractOne(
+        item_lower,
+        _SEARCHABLE_KEYS,
+        scorer=fuzz.WRatio,
+        processor=utils.default_process,
+        score_cutoff=FUZZY_THRESHOLD,
+    )
+
+    if match:
+        matched_key, score, _ = match
+        result = GST_RATES[matched_key]
+        _log.info(f"Fuzzy match: '{item_name}' → '{matched_key}' (score={score:.0f}%)")
+        if len(_fuzzy_cache) < _FUZZY_CACHE_MAX:
+            _fuzzy_cache[item_lower] = result
+        return result
+
+    # Cache the miss too so we don't re-search
+    if len(_fuzzy_cache) < _FUZZY_CACHE_MAX:
+        _fuzzy_cache[item_lower] = None
+    return None
+
+
+_claude_cache: dict | None = None  # in-memory copy to avoid repeated disk reads
+_cache_lock = __import__("threading").Lock()
 
 
 def load_cache():
-    """Load previously Claude-found items from cache file."""
+    """Load previously Claude-found items from cache file. Cached in memory after first read."""
+    global _claude_cache
+    if _claude_cache is not None:
+        return _claude_cache
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r") as f:
-                return json.load(f)
+                _claude_cache = json.load(f)
+                return _claude_cache
         except (json.JSONDecodeError, IOError) as e:
             _log.warning(f"GST cache corrupted, starting fresh: {e}")
-    return {}
+    _claude_cache = {}
+    return _claude_cache
 
 
 def save_cache(cache):
-    """Save newly found items to cache file — atomic write."""
-    tmp = CACHE_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cache, f, indent=2)
-    os.replace(tmp, CACHE_FILE)
+    """Save newly found items to cache file — atomic write with lock."""
+    global _claude_cache
+    with _cache_lock:
+        # Re-read from disk to merge any entries written by other workers
+        disk_cache = {}
+        if os.path.exists(CACHE_FILE):
+            try:
+                with open(CACHE_FILE, "r") as f:
+                    disk_cache = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        disk_cache.update(cache)
+        tmp = CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(disk_cache, f, indent=2)
+        os.replace(tmp, CACHE_FILE)
+        _claude_cache = disk_cache
+
+
+def _word_boundary_match(key: str, text: str) -> bool:
+    """Check if key appears as a whole word/phrase in text, not as a substring of another word."""
+    return bool(re.search(r'\b' + re.escape(key) + r'\b', text))
 
 
 def get_gst_rate(item_name):
     """
-    Basic lookup — checks hardcoded list only.
-    Use get_gst_rate_smart() for full Claude fallback.
+    Basic lookup with fuzzy fallback:
+    1. Exact match in hardcoded list
+    2. Word-boundary match
+    3. Fuzzy match (rapidfuzz)
+    4. Default 18%
     """
     item_lower = item_name.lower().strip()
 
@@ -310,19 +382,25 @@ def get_gst_rate(item_name):
         return GST_RATES[item_lower]
 
     for key in GST_RATES:
-        if key in item_lower:
+        if key != "default" and _word_boundary_match(key, item_lower):
             return GST_RATES[key]
+
+    # Fuzzy match
+    fuzzy_result = fuzzy_match(item_lower)
+    if fuzzy_result:
+        return fuzzy_result
 
     return GST_RATES["default"]
 
 
 def get_gst_rate_smart(item_name, client=None):
     """
-    Smart GST lookup — 4 step fallback system:
-    1. Hardcoded list  — instant, zero cost
-    2. Cache           — instant, zero cost
-    3. Claude API      — accurate, tiny cost
-    4. Default 18%     — last resort only
+    Smart GST lookup — 5 step fallback system:
+    1. Hardcoded list  — exact/substring, instant
+    2. Fuzzy match     — rapidfuzz similarity, instant
+    3. Cache           — Claude-found items from previous lookups
+    4. Claude API      — accurate, tiny cost
+    5. Default 18%     — last resort only
     """
     item_lower = item_name.lower().strip()
 
@@ -331,15 +409,20 @@ def get_gst_rate_smart(item_name, client=None):
         return GST_RATES[item_lower]
 
     for key in GST_RATES:
-        if key in item_lower:
+        if key != "default" and _word_boundary_match(key, item_lower):
             return GST_RATES[key]
 
-    # Step 2 — cache
+    # Step 2 — fuzzy match on hardcoded list
+    fuzzy_result = fuzzy_match(item_lower)
+    if fuzzy_result:
+        return fuzzy_result
+
+    # Step 3 — cache (Claude-found items from previous lookups)
     cache = load_cache()
     if item_lower in cache:
         return cache[item_lower]
 
-    # Step 3 — Claude API
+    # Step 4 — Claude API
     if client:
         try:
             response = client.messages.create(
@@ -356,6 +439,9 @@ def get_gst_rate_smart(item_name, client=None):
                 }]
             )
 
+            if not response.content:
+                _log.warning(f"Empty Claude response for '{item_name}'")
+                raise ValueError("Empty response from Claude")
             raw = response.content[0].text.strip()
 
             # Clean up any accidental markdown
@@ -364,8 +450,18 @@ def get_gst_rate_smart(item_name, client=None):
             result = json.loads(raw)
 
             if "hsn" in result and "gst" in result:
+                # Validate hsn is a non-empty string
+                hsn = result.get("hsn")
+                if not isinstance(hsn, str) or not hsn.strip():
+                    hsn = str(hsn) if hsn else "9999"
+                result["hsn"] = hsn.strip()
+
                 # Validate gst is one of India's 5 valid slabs
                 valid_slabs = [0, 5, 12, 18, 28]
+                try:
+                    result["gst"] = int(result["gst"])
+                except (TypeError, ValueError):
+                    result["gst"] = 18
                 if result["gst"] not in valid_slabs:
                     result["gst"] = 18  # safe default
 
@@ -377,7 +473,7 @@ def get_gst_rate_smart(item_name, client=None):
         except Exception as e:
             _log.warning(f"Claude lookup failed for '{item_name}': {e}")
 
-    # Step 4 — last resort default
+    # Step 5 — last resort default
     _log.warning(
         f"Unknown item '{item_name}' — "
         f"using default 18%. Add manually to GST_RATES if needed."

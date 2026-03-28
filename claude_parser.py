@@ -274,6 +274,15 @@ def _regex_parse_message(message: str) -> dict:
             ),
             "name_price",
         ),
+        # "itemprice" (no space)  — e.g. "shirt99", "pant700"
+        # Name must be ≥2 alpha chars to avoid "x5", "kg50", etc.
+        (
+            re.compile(
+                r"([A-Za-z]{2,}[A-Za-z\s]*)(\d{2,6})",
+                re.IGNORECASE,
+            ),
+            "name_nospace_price",
+        ),
     ]
 
     # Track character spans already consumed so patterns don't double-match
@@ -327,6 +336,10 @@ def _regex_parse_message(message: str) -> dict:
                     name  = _clean_name(m.group(2))
                     price = float(m.group(3))
                 elif ptype == "name_dash_price":
+                    name  = _clean_name(m.group(1))
+                    qty   = 1.0
+                    price = float(m.group(2))
+                elif ptype == "name_nospace_price":
                     name  = _clean_name(m.group(1))
                     qty   = 1.0
                     price = float(m.group(2))

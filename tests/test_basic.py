@@ -1196,3 +1196,43 @@ def test_x_quantity_no_space():
     assert len(result["items"]) == 1
     assert result["items"][0]["qty"] == 5
     assert result["items"][0]["price"] == 10
+
+
+def test_compact_no_space_single():
+    """'shirt99' should parse as item=shirt, price=99."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("shirt99")
+    assert len(result["items"]) == 1
+    assert result["items"][0]["name"].lower() == "shirt"
+    assert result["items"][0]["price"] == 99
+
+
+def test_compact_no_space_multiple():
+    """'shirt99 pant700' should parse both items."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("shirt99 pant700")
+    items = {i["name"].lower(): i for i in result["items"]}
+    assert "shirt" in items
+    assert items["shirt"]["price"] == 99
+    assert "pant" in items
+    assert items["pant"]["price"] == 700
+
+
+def test_compact_no_space_mixed_with_normal():
+    """'1 shirt 2000 shirt99' — explicit format + compact both parsed."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("1 shirt 2000 shirt99")
+    # Should have at least 2 items
+    assert len(result["items"]) >= 2
+    prices = [i["price"] for i in result["items"]]
+    assert 2000 in prices
+    assert 99 in prices
+
+
+def test_compact_no_space_rejects_short_names():
+    """'x5' should NOT be parsed as an item."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("x5")
+    # "x" is only 1 char — should be rejected by ≥2 alpha requirement + stopwords
+    items = [i for i in result.get("items", []) if i["name"].lower() == "x"]
+    assert len(items) == 0

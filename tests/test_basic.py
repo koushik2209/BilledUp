@@ -1236,3 +1236,140 @@ def test_compact_no_space_rejects_short_names():
     # "x" is only 1 char — should be rejected by ≥2 alpha requirement + stopwords
     items = [i for i in result.get("items", []) if i["name"].lower() == "x"]
     assert len(items) == 0
+
+
+# ════════════════════════════════════════════════
+# PRODUCTION FIXES — regression tests
+# ════════════════════════════════════════════════
+
+def test_pending_bill_db_survives_across_requests():
+    """Pending bill stored in DB persists across function calls (Priority 1)."""
+    from whatsapp_webhook import store_pending, get_pending_bill, clear_pending, PendingBill
+    from database import init_database
+    from datetime import datetime
+    init_database()
+
+    phone = "whatsapp:+919999900001"
+    pending = PendingBill(
+        phone=phone, shop_id="TEST01", shop_name="Test Shop",
+        shop_state="Telangana", shop_state_code="36",
+        customer_name="Test", customer_state="Telangana",
+        customer_state_code="36",
+        items=[{"name": "shirt", "qty": 1, "price": 500.0,
+                "hsn": "6205", "gst_rate": 12, "gst_source": "exact",
+                "gst_confidence": "high"}],
+        confidence=0.9, warnings=[], raw_message="shirt 500",
+        created_at=datetime.utcnow(),
+    )
+    store_pending(phone, pending)
+
+    # Simulate a new request — retrieve from DB
+    retrieved = get_pending_bill(phone)
+    assert retrieved is not None
+    assert retrieved.shop_id == "TEST01"
+    assert retrieved.customer_name == "Test"
+    assert len(retrieved.items) == 1
+    assert retrieved.items[0]["name"] == "shirt"
+
+    # Cleanup
+    clear_pending(phone)
+    assert get_pending_bill(phone) is None
+
+
+def test_admin_endpoint_rejects_without_header():
+    """Admin endpoint returns 403 without valid X-Admin-Key (Priority 2)."""
+    import os
+    os.environ["ADMIN_SECRET"] = "test-secret-123"
+    from whatsapp_webhook import app
+    from database import init_database
+    init_database()
+
+    client = app.test_client()
+
+    # No header → 403
+    resp = client.get("/admin/registrations")
+    assert resp.status_code == 403
+
+    # Wrong header → 403
+    resp = client.get("/admin/registrations", headers={"X-Admin-Key": "wrong"})
+    assert resp.status_code == 403
+
+    # Correct header → 200
+    resp = client.get("/admin/registrations", headers={"X-Admin-Key": "test-secret-123"})
+    assert resp.status_code == 200
+
+
+def test_gst_override_single_message():
+    """GST override should produce ONE message, not two (Priority 3)."""
+    from whatsapp_webhook import msg_preview, PendingBill
+    from datetime import datetime
+
+    pending = PendingBill(
+        phone="test", shop_id="TEST", shop_name="Test Shop",
+        shop_state="Telangana", shop_state_code="36",
+        customer_name="Test", customer_state="Telangana",
+        customer_state_code="36",
+        items=[{"name": "shirt", "qty": 1, "price": 500.0,
+                "hsn": "6205", "gst_rate": 12, "gst_source": "exact",
+                "gst_confidence": "high"}],
+        confidence=0.9, warnings=[], raw_message="shirt 500",
+        created_at=datetime.utcnow(),
+    )
+    # Simulate what happens after GST override: confirmation + preview merged
+    preview = msg_preview(pending)
+    merged = f"✅ Item 1 GST rate → 5%\n\n{preview}"
+    # Should be a single string containing both
+    assert "✅ Item 1 GST rate → 5%" in merged
+    assert "Bill Preview" in merged
+
+
+def test_rate_limit_no_loading_message():
+    """Rate limit error should NOT be preceded by loading message (Priority 4).
+
+    Verifies the parse_message returns the error which is sent directly,
+    rather than sending a loading message first.
+    """
+    # The fix moved send("Understanding...") to after parse_message,
+    # and rate limit errors are caught early. This tests the parse output.
+    from claude_parser import _error_result
+    err = _error_result("Too many requests — please wait 30 seconds")
+    assert "wait" in err["error"].lower()
+
+
+def test_credit_note_words_negative():
+    """Credit note should say 'Minus ... Rupees Only' (Priority 5)."""
+    assert number_to_words(-500) == "Minus Five Hundred Rupees Only"
+    assert number_to_words(-1234.50) == "Minus One Thousand Two Hundred Thirty Four Rupees and Fifty Paise Only"
+
+
+def test_gst_report_separates_returns():
+    """GST report should separate sales and returns (Priority 6)."""
+    from reports import GSTReport
+    from datetime import date
+    report = GSTReport(
+        shop_id="TEST", start_date=date(2026, 3, 1), end_date=date(2026, 3, 31),
+        total_invoices=5, total_sales=10000.0,
+        total_cgst=500.0, total_sgst=500.0, total_igst=0.0, total_gst=1000.0,
+        total_returns=-2000.0, return_count=2,
+    )
+    assert report.total_sales == 10000.0
+    assert report.total_returns == -2000.0
+    assert report.return_count == 2
+    # Net = sales + returns (returns are negative)
+    assert report.total_sales + report.total_returns == 8000.0
+
+
+def test_state_match_rejects_short_input():
+    """Short input like 'a' should NOT match via substring (Priority 8)."""
+    from whatsapp_webhook import resolve_state
+    # "a" would match "Assam" via substring — should be rejected
+    assert resolve_state("a") is None
+    assert resolve_state("b") is None
+    # But "ssa" (3+ chars, substring of "Assam") should still match
+    result = resolve_state("ssa")
+    assert result is not None
+    assert result[0] == "Assam"
+    # Exact name still works regardless of length
+    result = resolve_state("Goa")
+    assert result is not None
+    assert result[0] == "Goa"

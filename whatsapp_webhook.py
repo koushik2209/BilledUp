@@ -16,7 +16,6 @@ Features:
 import os
 import re
 import logging
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from flask import Flask, request
@@ -44,7 +43,7 @@ from main import (
     get_today_summary,
 )
 from database import (
-    db_session, Registration, ConversationLog, Shop,
+    db_session, Registration, ConversationLog, Shop, PendingBillRecord,
     init_database as init_db,
     generate_api_key, validate_api_key,
 )
@@ -149,7 +148,7 @@ def is_trial_active(reg: dict) -> bool:
     if not reg.get("trial_end"):
         return False
     trial_end = datetime.fromisoformat(reg["trial_end"])
-    return datetime.now() < trial_end
+    return datetime.utcnow() < trial_end
 
 
 def days_left(reg: dict) -> int:
@@ -157,7 +156,7 @@ def days_left(reg: dict) -> int:
     if not reg.get("trial_end"):
         return 0
     trial_end = datetime.fromisoformat(reg["trial_end"])
-    delta = trial_end - datetime.now()
+    delta = trial_end - datetime.utcnow()
     return max(0, delta.days)
 
 
@@ -166,7 +165,7 @@ def activate_trial(phone: str, shop_name: str, address: str, gstin: str = ""):
     Activate 10 day free trial for a new shopkeeper.
     Creates shop in database and marks registration active.
     """
-    trial_start = datetime.now()
+    trial_start = datetime.utcnow()
     trial_end   = trial_start + timedelta(days=10)
 
     # Generate unique shop_id from phone
@@ -527,10 +526,11 @@ def resolve_state(input_str: str) -> tuple[str, str] | None:
         if name.lower() == s_lower:
             return name, code
 
-    # Partial / substring match
-    for code, name in INDIAN_STATES.items():
-        if s_lower in name.lower():
-            return name, code
+    # Partial / substring match (only if input is >= 3 chars to avoid "a" matching "Assam")
+    if len(s_lower) >= 3:
+        for code, name in INDIAN_STATES.items():
+            if s_lower in name.lower():
+                return name, code
 
     return None
 
@@ -561,42 +561,80 @@ class PendingBill:
     is_return: bool = False
 
 
-_pending_bills: dict[str, PendingBill] = {}
-_pending_lock = threading.Lock()
+def _serialize_pending(bill: PendingBill) -> str:
+    """Serialize PendingBill to JSON string for DB storage."""
+    import json
+    data = {
+        "phone": bill.phone,
+        "shop_id": bill.shop_id,
+        "shop_name": bill.shop_name,
+        "shop_state": bill.shop_state,
+        "shop_state_code": bill.shop_state_code,
+        "customer_name": bill.customer_name,
+        "customer_state": bill.customer_state,
+        "customer_state_code": bill.customer_state_code,
+        "items": bill.items,
+        "confidence": bill.confidence,
+        "warnings": bill.warnings,
+        "raw_message": bill.raw_message,
+        "created_at": bill.created_at.isoformat(),
+        "awaiting_state": bill.awaiting_state,
+        "state_assumed": bill.state_assumed,
+        "is_return": bill.is_return,
+    }
+    return json.dumps(data)
+
+
+def _deserialize_pending(json_str: str) -> PendingBill:
+    """Deserialize JSON string back to PendingBill."""
+    import json
+    data = json.loads(json_str)
+    data["created_at"] = datetime.fromisoformat(data["created_at"])
+    return PendingBill(**data)
 
 
 def store_pending(phone: str, bill: PendingBill):
-    """Store a pending bill for a phone number (replaces any existing)."""
-    with _pending_lock:
-        _pending_bills[phone] = bill
+    """Store a pending bill in DB (replaces any existing)."""
+    expires_at = bill.created_at + timedelta(minutes=PENDING_EXPIRY_MINUTES)
+    with db_session() as session:
+        row = session.query(PendingBillRecord).filter_by(phone=phone).first()
+        if row:
+            row.data_json = _serialize_pending(bill)
+            row.expires_at = expires_at
+        else:
+            session.add(PendingBillRecord(
+                phone=phone,
+                data_json=_serialize_pending(bill),
+                expires_at=expires_at,
+            ))
 
 
 def get_pending_bill(phone: str) -> PendingBill | None:
     """Get pending bill if exists and not expired. Returns None if expired/missing."""
-    with _pending_lock:
-        bill = _pending_bills.get(phone)
-        if not bill:
+    with db_session() as session:
+        row = session.query(PendingBillRecord).filter_by(phone=phone).first()
+        if not row:
             return None
-        age = (datetime.now() - bill.created_at).total_seconds()
-        if age > PENDING_EXPIRY_MINUTES * 60:
-            del _pending_bills[phone]
+        if datetime.utcnow() > row.expires_at:
+            session.delete(row)
             return None
-        return bill
+        return _deserialize_pending(row.data_json)
 
 
 def clear_pending(phone: str):
     """Remove pending bill for a phone number."""
-    with _pending_lock:
-        _pending_bills.pop(phone, None)
+    with db_session() as session:
+        row = session.query(PendingBillRecord).filter_by(phone=phone).first()
+        if row:
+            session.delete(row)
 
 
 def cleanup_expired_pending():
     """Remove all expired pending bills. Called on each incoming message."""
-    cutoff = datetime.now() - timedelta(minutes=PENDING_EXPIRY_MINUTES)
-    with _pending_lock:
-        expired = [p for p, b in _pending_bills.items() if b.created_at < cutoff]
-        for p in expired:
-            del _pending_bills[p]
+    with db_session() as session:
+        session.query(PendingBillRecord).filter(
+            PendingBillRecord.expires_at < datetime.utcnow()
+        ).delete()
 
 
 # ════════════════════════════════════════════════
@@ -791,9 +829,12 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
                      shop_id: str, shop_name: str, d_left: int):
     """Parse message → store as pending → show preview."""
     try:
-        send(from_number, "⏳ Understanding your message...")
-
         parsed = parse_message(message)
+
+        # Rate limit hit — parse_message returns error, don't show loading msg
+        if parsed.get("error") and "wait" in str(parsed.get("error", "")).lower():
+            send(from_number, f"⏳ {parsed['error']}")
+            return
 
         if parsed.get("error") or not parsed.get("items"):
             error = parsed.get("error", "No items found")
@@ -854,7 +895,7 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             confidence         = parsed.get("confidence", 1.0),
             warnings           = parsed.get("warnings", []),
             raw_message        = message,
-            created_at         = datetime.now(),
+            created_at         = datetime.utcnow(),
             is_return          = is_return,
         )
 
@@ -922,7 +963,7 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             send(from_number, "Please enter a valid name.\n_Example: NAME Ravi Kumar_")
             return
         pending.customer_name = new_name.title()
-        pending.created_at = datetime.now()  # refresh expiry
+        pending.created_at = datetime.utcnow()  # refresh expiry
         store_pending(from_number, pending)
         send(from_number, msg_preview(pending))
         return
@@ -930,7 +971,7 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
     # CHANGE STATE / STATE
     if msg_lower in ("change state", "state", "igst"):
         pending.awaiting_state = True
-        pending.created_at = datetime.now()
+        pending.created_at = datetime.utcnow()
         store_pending(from_number, pending)
         send(from_number, msg_state_prompt())
         return
@@ -948,10 +989,9 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             return
         pending.items[item_idx - 1]["gst_rate"] = new_rate
         pending.items[item_idx - 1]["gst_source"] = "manual"
-        pending.created_at = datetime.now()
+        pending.created_at = datetime.utcnow()
         store_pending(from_number, pending)
-        send(from_number, f"✅ Item {item_idx} GST rate → {new_rate}%\n")
-        send(from_number, msg_preview(pending))
+        send(from_number, f"✅ Item {item_idx} GST rate → {new_rate}%\n\n{msg_preview(pending)}")
         return
 
     # GST rate override: "shirt gst 12" or "phone case gst 5%" (name-based)
@@ -971,10 +1011,9 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             return
         pending.items[matched_idx]["gst_rate"] = new_rate
         pending.items[matched_idx]["gst_source"] = "manual"
-        pending.created_at = datetime.now()
+        pending.created_at = datetime.utcnow()
         store_pending(from_number, pending)
-        send(from_number, f"✅ \"{pending.items[matched_idx]['name']}\" GST rate → {new_rate}%\n")
-        send(from_number, msg_preview(pending))
+        send(from_number, f"✅ \"{pending.items[matched_idx]['name']}\" GST rate → {new_rate}%\n\n{msg_preview(pending)}")
         return
 
     # EDIT
@@ -1025,7 +1064,7 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             pending.warnings    = parsed.get("warnings", [])
             pending.raw_message = message
             pending.is_return   = is_return
-            pending.created_at  = datetime.now()
+            pending.created_at  = datetime.utcnow()
             store_pending(from_number, pending)
             send(from_number, msg_preview(pending))
             return
@@ -1033,8 +1072,7 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
         log.debug(f"Natural correction parse failed: {e}")
 
     # Truly unknown command → re-show preview
-    send(from_number, f"❓ Unknown command. See options below:\n")
-    send(from_number, msg_preview(pending))
+    send(from_number, f"❓ Unknown command. See options below:\n\n{msg_preview(pending)}")
 
 
 def _handle_state_selection(from_number: str, message: str,
@@ -1045,7 +1083,7 @@ def _handle_state_selection(from_number: str, message: str,
     # BACK / cancel state change
     if msg_stripped.lower() in ("back", "cancel", "skip"):
         pending.awaiting_state = False
-        pending.created_at = datetime.now()
+        pending.created_at = datetime.utcnow()
         store_pending(from_number, pending)
         send(from_number, msg_preview(pending))
         return
@@ -1065,11 +1103,10 @@ def _handle_state_selection(from_number: str, message: str,
     pending.customer_state_code = state_code
     pending.awaiting_state      = False
     pending.state_assumed       = False
-    pending.created_at          = datetime.now()
+    pending.created_at          = datetime.utcnow()
     store_pending(from_number, pending)
 
-    send(from_number, f"✅ State set to *{state_name}* (Code: {state_code})\n")
-    send(from_number, msg_preview(pending))
+    send(from_number, f"✅ State set to *{state_name}* (Code: {state_code})\n\n{msg_preview(pending)}")
 
 
 def _generate_confirmed_bill(from_number: str, pending: PendingBill,
@@ -1360,7 +1397,7 @@ def health():
     return {
         "status":  "ok",
         "service": "BilledUp WhatsApp Webhook",
-        "time":    datetime.now().isoformat(),
+        "time":    datetime.utcnow().isoformat(),
     }, 200
 
 
@@ -1401,9 +1438,13 @@ def serve_report(filename):
 @app.route("/admin/registrations", methods=["GET"])
 def admin_registrations():
     """
-    Simple admin view — see all registered shopkeepers.
-    Visit: http://localhost:5000/admin/registrations
+    Admin view — see all registered shopkeepers.
+    Requires X-Admin-Key header matching ADMIN_SECRET env var.
     """
+    admin_secret = os.getenv("ADMIN_SECRET", "")
+    if not admin_secret or request.headers.get("X-Admin-Key") != admin_secret:
+        return {"error": "Unauthorized"}, 403
+
     with db_session() as session:
         rows = session.query(Registration).order_by(
             Registration.created_at.desc()
@@ -1419,7 +1460,7 @@ def admin_registrations():
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         if r.trial_end:
-            reg["days_left"] = max(0, (r.trial_end - datetime.now()).days)
+            reg["days_left"] = max(0, (r.trial_end - datetime.utcnow()).days)
         else:
             reg["days_left"] = 0
         result.append(reg)

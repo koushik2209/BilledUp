@@ -126,6 +126,14 @@ class ConversationLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class PendingBillRecord(Base):
+    __tablename__ = "pending_bills"
+
+    phone      = Column(String(30), primary_key=True)
+    data_json  = Column(Text, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+
 # ════════════════════════════════════════════════
 # SESSION HELPER
 # ════════════════════════════════════════════════

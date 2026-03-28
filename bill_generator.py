@@ -197,7 +197,7 @@ def number_to_words(amount: float) -> str:
     try:
         amount  = round(float(amount), 2)
         if amount < 0:
-            return "Amount in words unavailable"
+            return "Minus " + number_to_words(abs(amount))
         rupees  = int(amount)
         paise   = round((amount - rupees) * 100)
         result  = h(rupees).strip() or "Zero"

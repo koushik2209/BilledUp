@@ -1681,9 +1681,11 @@ if __name__ == "__main__":
     # ── LOCAL DEV ONLY ──
     # In production, Gunicorn imports this module and uses `app` directly.
     # This block only runs when you do: python whatsapp_webhook.py
+    from config import DEBUG as debug_mode
 
     print("\n" + "="*55)
     print("  BilledUp WhatsApp Webhook — LOCAL DEV SERVER")
+    print(f"  Debug mode: {debug_mode}")
     print("  Bill smarter. Grow faster.")
     print("="*55)
     print(f"  Phone number ID: {os.getenv('WHATSAPP_PHONE_NUMBER_ID', '(set in .env)')}")
@@ -1710,4 +1712,4 @@ if __name__ == "__main__":
     print("="*55 + "\n")
 
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=debug_mode)

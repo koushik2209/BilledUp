@@ -24,7 +24,13 @@ if not DATABASE_URL:
     )
 
 # ── App ──
-DEBUG             = os.getenv("DEBUG", "False") == "True"
+# Production safety: force DEBUG=False if any production env indicator is set,
+# even if DEBUG=True was set accidentally.
+_env = os.getenv("RAILWAY_ENVIRONMENT", "") or os.getenv("FLASK_ENV", "") or os.getenv("ENV", "")
+if _env.lower() == "production":
+    DEBUG = False
+else:
+    DEBUG = os.getenv("DEBUG", "False") == "True"
 PORT              = int(os.getenv("PORT", 5000))
 
 # ── Bill settings ──

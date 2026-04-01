@@ -17,7 +17,7 @@ from typing import Any
 
 from config import WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID
 
-log = logging.getLogger("billeasy.whatsapp_client")
+log = logging.getLogger("billedup.whatsapp_client")
 
 GRAPH_API_VERSION = "v22.0"
 MAX_RETRIES = 3

@@ -1,11 +1,11 @@
-# BillEasy
+# BilledUp
 
 AI-powered GST billing for Indian shops via WhatsApp.
 Bill smarter. Grow faster.
 
 ## What it does
 Shopkeeper types a message in Telugu/Hindi/English.
-BillEasy generates a legally valid GST bill PDF in 10 seconds.
+BilledUp generates a legally valid GST bill PDF in 10 seconds.
 
 ## Setup
 

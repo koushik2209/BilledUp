@@ -839,7 +839,7 @@ def test_return_gst_reversal_values():
     """Credit note GST values are negative and mathematically correct."""
     from bill_generator import generate_pdf_bill, ShopProfile, CustomerInfo
     import os
-    shop = ShopProfile("TEST", "Test Shop", "Hyderabad", "", "+91 9876543210")
+    shop = ShopProfile("TEST", "Test Shop", "Hyderabad", "36AABCU9603R1ZX", "+91 9876543210")
     customer = CustomerInfo("Test")
     items = [BillItem("phone case", 1, 500, hsn="3926", gst_rate=18)]
     pdf, br = generate_pdf_bill(shop, customer, items, "CN-TEST-001",

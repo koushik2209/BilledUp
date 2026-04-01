@@ -102,18 +102,19 @@ class InvoiceSequence(Base):
 class Registration(Base):
     __tablename__ = "registrations"
 
-    id          = Column(Integer, primary_key=True, autoincrement=True)
-    phone       = Column(String(30), unique=True, nullable=False, index=True)
-    shop_name   = Column(String(200), default="")
-    address     = Column(Text, default="")
-    gstin       = Column(String(20), default="")
-    state       = Column(String(20), default="NEW")
-    trial_start = Column(DateTime, nullable=True)
-    trial_end   = Column(DateTime, nullable=True)
-    active      = Column(Boolean, default=False)
-    bills_count = Column(Integer, default=0)
-    created_at  = Column(DateTime, default=datetime.utcnow)
-    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    phone        = Column(String(30), unique=True, nullable=False, index=True)
+    shop_name    = Column(String(200), default="")
+    address      = Column(Text, default="")
+    gstin        = Column(String(20), default="")
+    invoice_type = Column(String(20), default="TAX_INVOICE")
+    state        = Column(String(20), default="NEW")
+    trial_start  = Column(DateTime, nullable=True)
+    trial_end    = Column(DateTime, nullable=True)
+    active       = Column(Boolean, default=False)
+    bills_count  = Column(Integer, default=0)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ConversationLog(Base):

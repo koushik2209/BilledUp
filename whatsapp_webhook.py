@@ -93,6 +93,7 @@ def get_registration(phone: str) -> dict | None:
         return {
             "phone": row.phone, "shop_name": row.shop_name,
             "address": row.address, "gstin": row.gstin,
+            "invoice_type": row.invoice_type or "TAX_INVOICE",
             "state": row.state, "trial_start": row.trial_start.isoformat() if row.trial_start else None,
             "trial_end": row.trial_end.isoformat() if row.trial_end else None,
             "active": row.active, "bills_count": row.bills_count,
@@ -100,7 +101,7 @@ def get_registration(phone: str) -> dict | None:
 
 
 ALLOWED_REG_FIELDS = {
-    "shop_name", "address", "gstin", "state",
+    "shop_name", "address", "gstin", "invoice_type", "state",
     "trial_start", "trial_end", "active", "bills_count",
 }
 
@@ -151,9 +152,16 @@ def activate_trial(phone: str, shop_name: str, address: str, gstin: str = ""):
     """
     Activate 10 day free trial for a new shopkeeper.
     Creates shop in database and marks registration active.
+
+    Invoice type is derived from GSTIN:
+      - Valid GSTIN → TAX_INVOICE (GST applied)
+      - No GSTIN    → BILL_OF_SUPPLY (no GST)
     """
     trial_start = datetime.utcnow()
     trial_end   = trial_start + timedelta(days=10)
+
+    has_gstin    = bool(gstin and gstin.strip())
+    invoice_type = "TAX_INVOICE" if has_gstin else "BILL_OF_SUPPLY"
 
     # Generate unique shop_id from phone
     shop_id = "S" + re.sub(r"\D", "", phone)[-8:]
@@ -181,16 +189,17 @@ def activate_trial(phone: str, shop_name: str, address: str, gstin: str = ""):
     # Update registration
     upsert_registration(
         phone,
-        shop_name   = shop_name,
-        address     = address,
-        gstin       = gstin,
-        state       = "ACTIVE",
-        trial_start = trial_start.isoformat(),
-        trial_end   = trial_end.isoformat(),
-        active      = 1,
+        shop_name    = shop_name,
+        address      = address,
+        gstin        = gstin,
+        invoice_type = invoice_type,
+        state        = "ACTIVE",
+        trial_start  = trial_start.isoformat(),
+        trial_end    = trial_end.isoformat(),
+        active       = 1,
     )
 
-    log.info(f"Trial activated for {phone} — shop_id={shop_id} — ends {trial_end.date()}")
+    log.info(f"Trial activated for {phone} — shop_id={shop_id} — {invoice_type} — ends {trial_end.date()}")
     return shop_id, api_key
 
 
@@ -233,17 +242,25 @@ def msg_ask_gstin() -> str:
     )
 
 
-def msg_activated(shop_name: str, days: int, api_key: str = "") -> str:
+def msg_activated(shop_name: str, days: int, api_key: str = "", invoice_type: str = "TAX_INVOICE") -> str:
     key_line = f"\n🔑 *Your API Key:*\n`{api_key}`\n_Keep this safe — use it for API access._\n" if api_key else ""
+    if invoice_type == "BILL_OF_SUPPLY":
+        bill_type_line = (
+            "✅ Since you are not GST registered, your bills will be *Bill of Supply* (no GST).\n"
+            "_You can add GSTIN later to switch to Tax Invoice._\n"
+        )
+    else:
+        bill_type_line = "✅ Your bills will include GST (*Tax Invoice*).\n"
     return (
         f"🎊 *You are all set, {shop_name}!*\n\n"
+        f"{bill_type_line}\n"
         f"Your *{days}-day free trial* has started.\n"
         f"After trial: just Rs.299/month.\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
         f"*How to generate a bill:*\n\n"
         f"Just type your items and prices:\n\n"
         f"_phone case 299 charger 499 customer Suresh_\n\n"
-        f"Your GST bill will be ready in 10 seconds! ⚡\n\n"
+        f"Your bill will be ready in 10 seconds! ⚡\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
         f"*Commands:*\n"
         f"• *today* — Today's sales summary\n"
@@ -328,11 +345,20 @@ def msg_history(shop_id: str) -> str:
         return "Could not fetch history. Please try again."
 
 
-def msg_bill_summary(bill_result, invoice_number: str, customer_name: str, days: int, is_return: bool = False) -> str:
+def msg_bill_summary(bill_result, invoice_number: str, customer_name: str,
+                     days: int, is_return: bool = False, is_bill_of_supply: bool = False) -> str:
     sign = "-" if is_return else ""
-    doc_label = "Credit Note" if is_return else "Invoice"
     total_label = "REFUND" if is_return else "TOTAL"
-    header = "🔁 *Credit Note Generated!*" if is_return else "✅ *Bill Generated!*"
+
+    if is_return:
+        doc_label = "Credit Note"
+        header = "🔁 *Credit Note Generated!*"
+    elif is_bill_of_supply:
+        doc_label = "Bill of Supply"
+        header = "✅ *Bill of Supply Generated!*"
+    else:
+        doc_label = "Tax Invoice"
+        header = "✅ *Bill Generated!*"
 
     lines = [
         f"{header}\n",
@@ -342,19 +368,28 @@ def msg_bill_summary(bill_result, invoice_number: str, customer_name: str, days:
     ]
     for item in bill_result.items:
         qty = int(item.qty) if item.qty == int(item.qty) else item.qty
-        lines.append(f"• {item.name} x{qty} — {sign}Rs.{abs(item.total):.2f} ({item.gst_rate}% GST)")
+        if is_bill_of_supply:
+            lines.append(f"• {item.name} x{qty} — {sign}Rs.{abs(item.amount):.2f}")
+        else:
+            lines.append(f"• {item.name} x{qty} — {sign}Rs.{abs(item.total):.2f} ({item.gst_rate}% GST)")
 
     lines.append(f"\n━━━━━━━━━━━━━━━━━")
-    lines.append(f"Subtotal:  {sign}Rs.{abs(bill_result.subtotal):.2f}")
-    if bill_result.is_igst:
-        lines.append(f"IGST:      {sign}Rs.{abs(bill_result.total_igst):.2f}")
+    if is_bill_of_supply:
+        # No GST breakdown for Bill of Supply
+        lines.append(f"*{total_label}: {sign}Rs.{abs(bill_result.subtotal):.2f}*\n")
     else:
-        lines.append(f"CGST:      {sign}Rs.{abs(bill_result.total_cgst):.2f}")
-        lines.append(f"SGST:      {sign}Rs.{abs(bill_result.total_sgst):.2f}")
+        lines.append(f"Subtotal:  {sign}Rs.{abs(bill_result.subtotal):.2f}")
+        if bill_result.is_igst:
+            lines.append(f"IGST:      {sign}Rs.{abs(bill_result.total_igst):.2f}")
+        else:
+            lines.append(f"CGST:      {sign}Rs.{abs(bill_result.total_cgst):.2f}")
+            lines.append(f"SGST:      {sign}Rs.{abs(bill_result.total_sgst):.2f}")
+        lines += [
+            f"Total GST: {sign}Rs.{abs(bill_result.total_gst):.2f}",
+            f"━━━━━━━━━━━━━━━━━",
+            f"*{total_label}: {sign}Rs.{abs(bill_result.grand_total):.2f}*\n",
+        ]
     lines += [
-        f"Total GST: {sign}Rs.{abs(bill_result.total_gst):.2f}",
-        f"━━━━━━━━━━━━━━━━━",
-        f"*{total_label}: {sign}Rs.{abs(bill_result.grand_total):.2f}*\n",
         f"_{bill_result.in_words}_\n",
         f"📄 PDF attached below. Forward to customer.",
         f"Trial days left: {days}",
@@ -553,6 +588,7 @@ class PendingBill:
     awaiting_state: bool = False
     state_assumed: bool = True
     is_return: bool = False
+    is_bill_of_supply: bool = False
 
 
 def _serialize_pending(bill: PendingBill) -> str:
@@ -575,6 +611,7 @@ def _serialize_pending(bill: PendingBill) -> str:
         "awaiting_state": bill.awaiting_state,
         "state_assumed": bill.state_assumed,
         "is_return": bill.is_return,
+        "is_bill_of_supply": bill.is_bill_of_supply,
     }
     return json.dumps(data)
 
@@ -584,6 +621,8 @@ def _deserialize_pending(json_str: str) -> PendingBill:
     import json
     data = json.loads(json_str)
     data["created_at"] = datetime.fromisoformat(data["created_at"])
+    # Backwards compat: old pending bills in DB won't have this field
+    data.setdefault("is_bill_of_supply", False)
     return PendingBill(**data)
 
 
@@ -650,6 +689,7 @@ def _compute_preview_totals(pending: PendingBill) -> dict:
             gst_client=None,
             shop_state_code=pending.shop_state_code,
             customer_state_code=pending.customer_state_code,
+            bill_of_supply=pending.is_bill_of_supply,
         )
         # For credit notes, negate all amounts
         sign = -1 if pending.is_return else 1
@@ -680,56 +720,68 @@ def msg_preview(pending: PendingBill) -> str:
             f"👤 Customer: *{pending.customer_name}*",
         ]
 
-    # ── State + tax type (always show assumed tag) ──
-    is_intra = pending.customer_state_code == pending.shop_state_code
-    assumed_tag = " _(assumed)_" if pending.state_assumed else ""
-
-    if is_intra:
-        lines.append(f"📍 State: {pending.customer_state}{assumed_tag}")
-        lines.append(f"💰 Tax: CGST + SGST (intra-state)")
+    # ── Invoice type + state/tax type ──
+    if pending.is_bill_of_supply:
+        lines.append(f"📄 Type: *Bill of Supply* (no GST)")
     else:
-        lines.append(f"📍 State: {pending.customer_state} (Code: {pending.customer_state_code}){assumed_tag}")
-        lines.append(f"💰 Tax: IGST (inter-state)")
+        is_intra = pending.customer_state_code == pending.shop_state_code
+        assumed_tag = " _(assumed)_" if pending.state_assumed else ""
 
-    if pending.state_assumed:
-        lines.append(f"_If different, reply:_ *STATE*")
+        if is_intra:
+            lines.append(f"📍 State: {pending.customer_state}{assumed_tag}")
+            lines.append(f"💰 Tax: CGST + SGST (intra-state)")
+        else:
+            lines.append(f"📍 State: {pending.customer_state} (Code: {pending.customer_state_code}){assumed_tag}")
+            lines.append(f"💰 Tax: IGST (inter-state)")
 
-    # ── Items (with GST rate per item) ──
+        if pending.state_assumed:
+            lines.append(f"_If different, reply:_ *STATE*")
+
+    # ── Items ──
     lines.append(f"\n*{'Return Items' if pending.is_return else 'Items'}:*")
     has_low_confidence = False
     for i, item in enumerate(pending.items, 1):
         qty = int(item["qty"]) if item["qty"] == int(item["qty"]) else item["qty"]
-        rate = item.get("gst_rate", 18)
-        confidence = item.get("gst_confidence", item.get("gst_source", ""))
         display_price = abs(item["price"])
         sign = "-" if pending.is_return else ""
-        if confidence == "low" or confidence == "default":
-            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST ⚠️)")
-            has_low_confidence = True
-        elif confidence == "medium" or confidence == "fuzzy":
-            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST ~)")
+
+        if pending.is_bill_of_supply:
+            # No GST info shown for Bill of Supply
+            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}")
         else:
-            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST)")
+            rate = item.get("gst_rate", 18)
+            confidence = item.get("gst_confidence", item.get("gst_source", ""))
+            if confidence == "low" or confidence == "default":
+                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST ⚠️)")
+                has_low_confidence = True
+            elif confidence == "medium" or confidence == "fuzzy":
+                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST ~)")
+            else:
+                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST)")
 
     # ── Single grouped warning for low-confidence items ──
     if has_low_confidence:
         lines.append(f"\n⚠️ GST assumed for some items (default 18%). Verify if needed.")
         lines.append(f"_Fix: *GST 1 12* or *shirt gst 12*_")
 
-    # ── GST breakdown ──
+    # ── Totals ──
     totals = _compute_preview_totals(pending)
     if totals:
         sign = "-" if pending.is_return else ""
         lines.append(f"\n━━━━━━━━━━━━━━━━━")
-        lines.append(f"Subtotal: {sign}Rs.{abs(totals['subtotal']):.2f}")
-        if totals["is_igst"]:
-            lines.append(f"IGST:     {sign}Rs.{abs(totals['total_igst']):.2f}")
+        if pending.is_bill_of_supply:
+            # Bill of Supply: total = subtotal, no GST breakdown
+            lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'}: {sign}Rs.{abs(totals['subtotal']):.2f}*")
         else:
-            lines.append(f"CGST:     {sign}Rs.{abs(totals['total_cgst']):.2f}")
-            lines.append(f"SGST:     {sign}Rs.{abs(totals['total_sgst']):.2f}")
-        lines.append(f"Total GST: {sign}Rs.{abs(totals['total_gst']):.2f}")
-        lines.append(f"━━━━━━━━━━━━━━━━━")
-        lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'}: {sign}Rs.{abs(totals['grand_total']):.2f}*")
+            lines.append(f"Subtotal: {sign}Rs.{abs(totals['subtotal']):.2f}")
+            if totals["is_igst"]:
+                lines.append(f"IGST:     {sign}Rs.{abs(totals['total_igst']):.2f}")
+            else:
+                lines.append(f"CGST:     {sign}Rs.{abs(totals['total_cgst']):.2f}")
+                lines.append(f"SGST:     {sign}Rs.{abs(totals['total_sgst']):.2f}")
+            lines.append(f"Total GST: {sign}Rs.{abs(totals['total_gst']):.2f}")
+            lines.append(f"━━━━━━━━━━━━━━━━━")
+            lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'}: {sign}Rs.{abs(totals['grand_total']):.2f}*")
 
     # ── Confidence warning ──
     if pending.confidence < 0.8:
@@ -744,11 +796,13 @@ def msg_preview(pending: PendingBill) -> str:
     lines.append(f"Reply:")
     lines.append(f"• *YES* → Confirm")
     lines.append(f"• *EDIT* → Re-enter items")
-    lines.append(f"• *GST 1 12* or *shirt gst 12* → Fix rate")
+    if not pending.is_bill_of_supply:
+        lines.append(f"• *GST 1 12* or *shirt gst 12* → Fix rate")
     lines.append(f"• *CANCEL* → Discard")
     if not pending.is_return:
         lines.append(f"• *NAME Ravi* → Change name")
-        lines.append(f"• *STATE* → Change state")
+        if not pending.is_bill_of_supply:
+            lines.append(f"• *STATE* → Change state")
     return "\n".join(lines)
 
 
@@ -854,19 +908,28 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             shop_state      = "Telangana"
             shop_state_code = "36"
 
-        # Resolve GST rates now so preview and final bill use identical rates
+        # Determine invoice type from registration
+        is_bos = reg.get("invoice_type") == "BILL_OF_SUPPLY"
+
+        # Resolve GST rates (skip for Bill of Supply — no GST applied)
         for item in parsed["items"]:
-            try:
-                rate_info = get_gst_rate_smart(item["name"], get_anthropic_client())
-            except Exception as e:
-                log.warning(f"GST lookup failed for '{item['name']}': {e}")
-                rate_info = {"hsn": "9999", "gst": 18, "source": "default", "confidence": "low"}
-            # Apply price-based slab (clothing/footwear)
-            rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
-            item["hsn"]           = rate_info.get("hsn", "9999")
-            item["gst_rate"]      = rate_info.get("gst", 18)
-            item["gst_source"]    = rate_info.get("source", "default")
-            item["gst_confidence"] = rate_info.get("confidence", "low")
+            if is_bos:
+                item["hsn"]            = "9999"
+                item["gst_rate"]       = 0
+                item["gst_source"]     = "bill_of_supply"
+                item["gst_confidence"] = "high"
+            else:
+                try:
+                    rate_info = get_gst_rate_smart(item["name"], get_anthropic_client())
+                except Exception as e:
+                    log.warning(f"GST lookup failed for '{item['name']}': {e}")
+                    rate_info = {"hsn": "9999", "gst": 18, "source": "default", "confidence": "low"}
+                # Apply price-based slab (clothing/footwear)
+                rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
+                item["hsn"]            = rate_info.get("hsn", "9999")
+                item["gst_rate"]       = rate_info.get("gst", 18)
+                item["gst_source"]     = rate_info.get("source", "default")
+                item["gst_confidence"] = rate_info.get("confidence", "low")
 
         # Detect return/credit note intent
         is_return = detect_return_intent(message, parsed["items"])
@@ -895,6 +958,7 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             raw_message        = message,
             created_at         = datetime.utcnow(),
             is_return          = is_return,
+            is_bill_of_supply  = is_bos,
         )
 
         store_pending(from_number, pending)
@@ -1035,15 +1099,21 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             shop_state_code = shop.state_code if shop else pending.shop_state_code
 
             for item in parsed["items"]:
-                try:
-                    rate_info = get_gst_rate_smart(item["name"], get_anthropic_client())
-                except Exception:
-                    rate_info = {"hsn": "9999", "gst": 18, "source": "default", "confidence": "low"}
-                rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
-                item["hsn"]           = rate_info.get("hsn", "9999")
-                item["gst_rate"]      = rate_info.get("gst", 18)
-                item["gst_source"]    = rate_info.get("source", "default")
-                item["gst_confidence"] = rate_info.get("confidence", "low")
+                if pending.is_bill_of_supply:
+                    item["hsn"]            = "9999"
+                    item["gst_rate"]       = 0
+                    item["gst_source"]     = "bill_of_supply"
+                    item["gst_confidence"] = "high"
+                else:
+                    try:
+                        rate_info = get_gst_rate_smart(item["name"], get_anthropic_client())
+                    except Exception:
+                        rate_info = {"hsn": "9999", "gst": 18, "source": "default", "confidence": "low"}
+                    rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
+                    item["hsn"]           = rate_info.get("hsn", "9999")
+                    item["gst_rate"]      = rate_info.get("gst", 18)
+                    item["gst_source"]    = rate_info.get("source", "default")
+                    item["gst_confidence"] = rate_info.get("confidence", "low")
 
             is_return = detect_return_intent(message, parsed["items"])
             bill_items = parsed["items"]
@@ -1175,15 +1245,16 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
 
         # Send bill summary + PDF
         summary = msg_bill_summary(
-            bill_result    = bill_result,
-            invoice_number = invoice_number,
-            customer_name  = pending.customer_name,
-            days           = d_left,
-            is_return      = pending.is_return,
+            bill_result       = bill_result,
+            invoice_number    = invoice_number,
+            customer_name     = pending.customer_name,
+            days              = d_left,
+            is_return         = pending.is_return,
+            is_bill_of_supply = pending.is_bill_of_supply,
         )
         send(from_number, summary)
 
-        doc_label = "Credit Note" if pending.is_return else "Invoice"
+        doc_label = "Credit Note" if pending.is_return else ("Bill of Supply" if pending.is_bill_of_supply else "Invoice")
         sign = "-" if pending.is_return else ""
         send_pdf(
             to       = from_number,
@@ -1261,10 +1332,10 @@ def handle_message(from_number: str, message: str):
         address   = reg.get("address", "")
 
         if msg_lower == "skip":
-            # Skip GSTIN — activate with placeholder
+            # Skip GSTIN — Bill of Supply (no GST)
             shop_id, api_key = activate_trial(from_number, shop_name, address, "")
             d_left  = days_left(get_registration(from_number))
-            send(from_number, msg_activated(shop_name, d_left, api_key))
+            send(from_number, msg_activated(shop_name, d_left, api_key, invoice_type="BILL_OF_SUPPLY"))
             return
 
         gstin = message.strip().upper()
@@ -1272,10 +1343,10 @@ def handle_message(from_number: str, message: str):
             send(from_number, msg_invalid_gstin())
             return
 
-        # Valid GSTIN — activate trial
+        # Valid GSTIN — Tax Invoice (GST applied)
         shop_id, api_key = activate_trial(from_number, shop_name, address, gstin)
         d_left  = days_left(get_registration(from_number))
-        send(from_number, msg_activated(shop_name, d_left, api_key))
+        send(from_number, msg_activated(shop_name, d_left, api_key, invoice_type="TAX_INVOICE"))
         return
 
     # ── STATE: ACTIVE — registered shopkeeper ──
@@ -1458,6 +1529,7 @@ def admin_registrations():
         reg = {
             "phone": r.phone, "shop_name": r.shop_name,
             "address": r.address, "gstin": r.gstin,
+            "invoice_type": r.invoice_type or "TAX_INVOICE",
             "state": r.state, "trial_end": r.trial_end.isoformat() if r.trial_end else None,
             "bills_count": r.bills_count,
             "created_at": r.created_at.isoformat() if r.created_at else None,

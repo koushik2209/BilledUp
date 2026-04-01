@@ -16,7 +16,7 @@
 
 7. **GST Report system**: `reports.py` handles monthly and date-range GST summaries. WhatsApp command `gst report [range]` triggers DB aggregation → WhatsApp text + PDF. Supports: empty (current month), "last N days", "last month", "this month", month names. PDF generated via ReportLab, saved in `reports/` folder. Indian number formatting (lakh/crore system). `GSTReport` dataclass holds all fields.
 
-8. **Bill preview/confirmation flow**: After parsing, bills are NOT generated immediately. A preview is shown with items, customer name, and tax type. User must reply YES to confirm. Can modify name (`NAME Ravi`), state (`STATE` → state selection sub-flow), re-enter items (`EDIT`), or `CANCEL`. Pending bills stored in-memory (`_pending_bills` dict, keyed by phone, thread-safe, 10-minute expiry). Commands like `help`, `today`, `history` still work during confirmation mode. **Natural correction**: if user sends a new item-like message while a pending bill exists, it's auto-parsed and replaces the pending bill (no need to EDIT first). Credit note previews show a minimal command list (YES/EDIT/CANCEL only).
+8. **Bill preview/confirmation flow**: After parsing, bills are NOT generated immediately. A preview is shown with items, customer name, and tax type. User must reply YES to confirm. Can modify name (`NAME Ravi`), state (`STATE` → state selection sub-flow), re-enter items (`EDIT`), or `CANCEL`. Pending bills stored in DB (`PendingBillRecord` table, keyed by phone, 10-minute expiry) — safe across multiple gunicorn workers. Commands like `help`, `today`, `history` still work during confirmation mode. **Natural correction**: if user sends a new item-like message while a pending bill exists, it's auto-parsed and replaces the pending bill (no need to EDIT first). Credit note previews show a minimal command list (YES/EDIT/CANCEL only).
 
 8. **TAX INVOICE vs BILL OF SUPPLY**: If shop has valid GSTIN (regex-validated) → TAX INVOICE with full CGST/SGST breakdown. If placeholder/empty/invalid → BILL OF SUPPLY with no tax columns in PDF. Controlled by `ShopProfile.has_gstin` property.
 
@@ -120,7 +120,7 @@
 
 5. **Confidence threshold**: Bills with confidence < 0.8 show a warning in the preview. Below 0.3, a stronger warning is added. The regex fallback caps at 0.6.
 
-6. **Pending bill is in-memory per worker**: `_pending_bills` dict in `whatsapp_webhook.py` is per-gunicorn-worker. If the same user's messages hit different workers, the pending bill may not be found. Acceptable for current scale; migrate to DB if needed.
+6. **Pending bill is DB-backed**: `PendingBillRecord` table stores pending bills (serialized as JSON). Safe across multiple gunicorn workers. Expired entries cleaned up on each incoming message.
 
 6. **Thread safety**: Invoice sequence uses both a Python `threading.Lock` and SQL `WITH FOR UPDATE`. The Python lock is needed because SQLite doesn't support row-level locking. GST cache also uses a threading lock for concurrent worker safety.
 

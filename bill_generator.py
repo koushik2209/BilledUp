@@ -229,12 +229,21 @@ def calculate_bill(
     gst_client=None,
     shop_state_code: str = "",
     customer_state_code: str = "",
+    bill_of_supply: bool = False,
 ) -> BillResult:
+    """Calculate bill totals.
+
+    bill_of_supply=True → all GST is zero (shop has no GSTIN).
+    Items still get HSN codes for record-keeping but gst_rate is forced to 0%.
+    """
     if not items:
         raise ValueError("Cannot generate bill — no items provided")
 
     intra = is_intra_state(shop_state_code, customer_state_code)
-    log.info(f"Tax type: {'CGST+SGST (intra-state)' if intra else 'IGST (inter-state)'}")
+    if bill_of_supply:
+        log.info("Bill of Supply — no GST applied")
+    else:
+        log.info(f"Tax type: {'CGST+SGST (intra-state)' if intra else 'IGST (inter-state)'}")
 
     from gst_rates import get_gst_rate_smart, adjust_gst_for_price
     processed = []
@@ -263,14 +272,19 @@ def calculate_bill(
             hsn      = rate_info.get("hsn", "9999")
             gst_rate = rate_info.get("gst", 18)
 
-        if gst_rate not in VALID_GST_SLABS:
+        # Bill of Supply → force zero GST (keep HSN for records)
+        if bill_of_supply:
+            gst_rate = 0
+        elif gst_rate not in VALID_GST_SLABS:
             log.warning(f"Invalid slab {gst_rate}% for '{name}' — correcting to 18%")
             gst_rate = 18
 
         amount  = round(qty * price, 2)
         gst_amt = round(amount * gst_rate / 100, 2)
 
-        if intra:
+        if bill_of_supply:
+            cgst = sgst = igst = 0.0
+        elif intra:
             cgst = round(gst_amt / 2, 2)
             sgst = round(gst_amt - cgst, 2)
             igst = 0.0
@@ -317,22 +331,33 @@ def calculate_bill(
  
 def _styles() -> dict:
     return {
-        "brand_white":   ParagraphStyle("bw",  fontSize=20, textColor=WHITE,     fontName="Helvetica-Bold", alignment=TA_LEFT),
-        "tagline_white": ParagraphStyle("tw",  fontSize=8,  textColor=colors.HexColor("#cce0ff"), fontName="Helvetica", alignment=TA_LEFT),
-        "invoice_white": ParagraphStyle("iw",  fontSize=14, textColor=WHITE,     fontName="Helvetica-Bold", alignment=TA_RIGHT),
-        "label":         ParagraphStyle("lb",  fontSize=7,  textColor=TEXT_GRAY, fontName="Helvetica-Bold"),
-        "small":         ParagraphStyle("sm",  fontSize=8,  textColor=BLACK,     fontName="Helvetica"),
-        "small_bold":    ParagraphStyle("sb",  fontSize=8,  textColor=BLACK,     fontName="Helvetica-Bold"),
-        "meta_right":    ParagraphStyle("mr",  fontSize=9,  textColor=BLACK,     fontName="Helvetica-Bold", alignment=TA_RIGHT),
-        "gstin":         ParagraphStyle("gs",  fontSize=9,  textColor=BRAND_BLUE,fontName="Helvetica-Bold"),
-        "grand_label":   ParagraphStyle("gl",  fontSize=10, textColor=WHITE,     fontName="Helvetica-Bold", alignment=TA_RIGHT),
-        "grand_value":   ParagraphStyle("gv",  fontSize=11, textColor=WHITE,     fontName="Helvetica-Bold", alignment=TA_RIGHT),
-        "words":         ParagraphStyle("wd",  fontSize=7,  textColor=TEXT_GRAY, fontName="Helvetica"),
-        "sig":           ParagraphStyle("sg",  fontSize=7,  textColor=TEXT_GRAY, fontName="Helvetica",      alignment=TA_RIGHT),
-        "footer":        ParagraphStyle("ft",  fontSize=7,  textColor=TEXT_GRAY, fontName="Helvetica",      alignment=TA_CENTER),
-        "total_right":   ParagraphStyle("trr", fontSize=9,  textColor=TEXT_GRAY, fontName="Helvetica",      alignment=TA_RIGHT),
-        "total_label":   ParagraphStyle("trl", fontSize=9,  textColor=TEXT_GRAY, fontName="Helvetica"),
-        "bill_type":     ParagraphStyle("bt",  fontSize=7,  textColor=colors.HexColor("#cce0ff"), fontName="Helvetica", alignment=TA_RIGHT),
+        # Header
+        "shop_name":     ParagraphStyle("sn",  fontSize=18, textColor=BRAND_DARK, fontName="Helvetica-Bold", alignment=TA_LEFT),
+        "doc_type":      ParagraphStyle("dt",  fontSize=11, textColor=BRAND_BLUE, fontName="Helvetica-Bold", alignment=TA_RIGHT),
+        "doc_sub":       ParagraphStyle("ds",  fontSize=8,  textColor=TEXT_GRAY,  fontName="Helvetica",      alignment=TA_RIGHT),
+        # Sections
+        "section_label": ParagraphStyle("sl",  fontSize=7,  textColor=BRAND_BLUE, fontName="Helvetica-Bold", spaceBefore=0, spaceAfter=1),
+        "label":         ParagraphStyle("lb",  fontSize=7,  textColor=TEXT_GRAY,  fontName="Helvetica-Bold"),
+        "small":         ParagraphStyle("sm",  fontSize=8,  textColor=BLACK,      fontName="Helvetica"),
+        "small_bold":    ParagraphStyle("sb",  fontSize=8,  textColor=BLACK,      fontName="Helvetica-Bold"),
+        "small_right":   ParagraphStyle("sr",  fontSize=8,  textColor=BLACK,      fontName="Helvetica",      alignment=TA_RIGHT),
+        "meta_label":    ParagraphStyle("ml",  fontSize=8,  textColor=TEXT_GRAY,  fontName="Helvetica"),
+        "meta_value":    ParagraphStyle("mv",  fontSize=8,  textColor=BLACK,      fontName="Helvetica-Bold"),
+        "gstin":         ParagraphStyle("gs",  fontSize=8,  textColor=BRAND_BLUE, fontName="Helvetica-Bold"),
+        # Table
+        "th":            ParagraphStyle("th",  fontSize=8,  textColor=WHITE,      fontName="Helvetica-Bold"),
+        "td":            ParagraphStyle("td",  fontSize=8,  textColor=BLACK,      fontName="Helvetica"),
+        "td_bold":       ParagraphStyle("tdb", fontSize=8,  textColor=BLACK,      fontName="Helvetica-Bold"),
+        # Totals
+        "total_label":   ParagraphStyle("trl", fontSize=9,  textColor=TEXT_GRAY,  fontName="Helvetica"),
+        "total_value":   ParagraphStyle("trv", fontSize=9,  textColor=BLACK,      fontName="Helvetica",      alignment=TA_RIGHT),
+        "grand_label":   ParagraphStyle("gl",  fontSize=11, textColor=WHITE,      fontName="Helvetica-Bold", alignment=TA_RIGHT),
+        "grand_value":   ParagraphStyle("gv",  fontSize=12, textColor=WHITE,      fontName="Helvetica-Bold", alignment=TA_RIGHT),
+        "words":         ParagraphStyle("wd",  fontSize=7,  textColor=TEXT_GRAY,  fontName="Helvetica-Oblique"),
+        # Footer
+        "footer":        ParagraphStyle("ft",  fontSize=7,  textColor=TEXT_GRAY,  fontName="Helvetica",      alignment=TA_CENTER),
+        "powered":       ParagraphStyle("pw",  fontSize=8,  textColor=BRAND_BLUE, fontName="Helvetica-Bold", alignment=TA_CENTER),
+        "terms":         ParagraphStyle("tm",  fontSize=6,  textColor=TEXT_GRAY,  fontName="Helvetica"),
     }
  
  
@@ -366,7 +391,10 @@ def generate_pdf_bill(
     if not invoice_number.strip():
         raise ValueError("Invoice number cannot be empty")
 
-    bill = calculate_bill(items, gst_client, shop.state_code, customer.state_code)
+    bill = calculate_bill(
+        items, gst_client, shop.state_code, customer.state_code,
+        bill_of_supply=not shop.has_gstin,
+    )
 
     # For credit notes, negate all monetary values in the result
     if is_return:
@@ -401,261 +429,244 @@ def generate_pdf_bill(
     story = []
     today = datetime.now().strftime("%d %B %Y")
     HW    = PAGE_W / 2
- 
-    # ── HEADER ──
-    # Shows CREDIT NOTE / TAX INVOICE / BILL OF SUPPLY
+
+    # ── HEADER: Shop name (left) + Doc type (right) ──
     if is_return:
         doc_type = "CREDIT NOTE"
         doc_sub  = "Return / Refund"
     else:
         doc_type = shop.invoice_type
-        doc_sub  = "GST Registered" if shop.has_gstin else "Composition / Unregistered"
+        doc_sub  = "GST Registered" if shop.has_gstin else "Unregistered"
 
     ht = Table([[
         [
-            Paragraph(PLATFORM_NAME, s["brand_white"]),
-            Paragraph(PLATFORM_TAGLINE, s["tagline_white"]),
+            Paragraph(xml_escape(shop.name), s["shop_name"]),
         ],
         [
-            Paragraph(doc_type, s["invoice_white"]),
-            Paragraph(doc_sub, s["bill_type"]),
+            Paragraph(doc_type, s["doc_type"]),
+            Paragraph(doc_sub,  s["doc_sub"]),
         ],
     ]], colWidths=[HW, HW])
     ht.setStyle(TableStyle([
-        ("BACKGROUND",    (0,0), (-1,-1), BRAND_BLUE),
         ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
-        ("TOPPADDING",    (0,0), (-1,-1), 10),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 10),
-        ("LEFTPADDING",   (0,0), (0,-1),  10),
-        ("RIGHTPADDING",  (-1,0),(-1,-1), 10),
+        ("TOPPADDING",    (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("LINEBELOW",     (0,0), (-1,-1), 1.5, BRAND_BLUE),
     ]))
     story.append(ht)
+    story.append(Spacer(1, 2*mm))
+
+    # ── SHOP + INVOICE DETAILS (two-column row) ──
+    shop_info = [
+        Paragraph(xml_escape(shop.address), s["small"]),
+        Paragraph(f"Phone: {xml_escape(shop.phone)}", s["small"]),
+    ]
+    if shop.has_gstin:
+        shop_info.append(Paragraph(f"GSTIN: {xml_escape(shop.display_gstin)}", s["gstin"]))
+    shop_info.append(
+        Paragraph(f"State: {xml_escape(shop.state)}  |  Code: {xml_escape(shop.state_code)}", s["small"]),
+    )
+
+    meta_data = [
+        [Paragraph("Invoice No:",  s["meta_label"]), Paragraph(invoice_number, s["meta_value"])],
+        [Paragraph("Date:",        s["meta_label"]), Paragraph(today,          s["meta_value"])],
+    ]
+    if shop.upi:
+        meta_data.append(
+            [Paragraph("UPI:", s["meta_label"]), Paragraph(shop.upi, s["meta_value"])],
+        )
+    meta_tbl = Table(meta_data, colWidths=[22*mm, HW - 24*mm])
+    meta_tbl.setStyle(TableStyle([
+        ("TOPPADDING",    (0,0), (-1,-1), 1),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+        ("LEFTPADDING",   (0,0), (-1,-1), 0),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 0),
+        ("VALIGN",        (0,0), (-1,-1), "TOP"),
+    ]))
+
+    info_row = Table([[shop_info, meta_tbl]], colWidths=[HW, HW])
+    info_row.setStyle(TableStyle([
+        ("VALIGN",        (0,0), (-1,-1), "TOP"),
+        ("TOPPADDING",    (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("LEFTPADDING",   (0,0), (-1,-1), 0),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 0),
+    ]))
+    story.append(info_row)
     story.append(Spacer(1, 3*mm))
- 
-    # ── INVOICE META ──
-    mt = Table([[
-        Paragraph(f"<b>Invoice No:</b>  {invoice_number}", s["small_bold"]),
-        Paragraph(f"<b>Date:</b>  {today}", s["meta_right"]),
-    ]], colWidths=[HW, HW])
-    mt.setStyle(TableStyle([
+
+    # ── CUSTOMER ──
+    cust_lines = [
+        Paragraph("BILL TO", s["section_label"]),
+        Paragraph(f"<b>{xml_escape(customer.name)}</b>", s["small_bold"]),
+    ]
+    if customer.address:
+        cust_lines.append(Paragraph(xml_escape(customer.address), s["small"]))
+    if customer.phone:
+        cust_lines.append(Paragraph(f"Phone: {xml_escape(customer.phone)}", s["small"]))
+    if customer.gstin:
+        cust_lines.append(Paragraph(f"GSTIN: {xml_escape(customer.gstin.upper())}", s["gstin"]))
+    if customer.state:
+        state_str = f"State: {xml_escape(customer.state)}"
+        if customer.state_code:
+            state_str += f"  |  Code: {xml_escape(customer.state_code)}"
+        cust_lines.append(Paragraph(state_str, s["small"]))
+
+    ct = Table([[cust_lines]], colWidths=[PAGE_W])
+    ct.setStyle(TableStyle([
         ("BACKGROUND",    (0,0), (-1,-1), LIGHT_GRAY),
         ("BOX",           (0,0), (-1,-1), 0.5, MID_GRAY),
         ("TOPPADDING",    (0,0), (-1,-1), 6),
         ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-        ("LEFTPADDING",   (0,0), (-1,-1), 10),
-        ("RIGHTPADDING",  (0,0), (-1,-1), 10),
+        ("LEFTPADDING",   (0,0), (-1,-1), 8),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 8),
     ]))
-    story.append(mt)
-    story.append(Spacer(1, 3*mm))
- 
-    # ── SELLER + BUYER ──
-    seller_b = [
-        Paragraph("SELLER", s["label"]),
-        Spacer(1, 1.5*mm),
-        Paragraph(f"<b>{xml_escape(shop.name)}</b>",                              s["small_bold"]),
-        Paragraph(xml_escape(shop.address),                                        s["small"]),
-        Paragraph(f"Phone: {xml_escape(shop.phone)}",                             s["small"]),
-        Paragraph(f"<b>GSTIN: {xml_escape(shop.display_gstin)}</b>",              s["gstin"]),
-        Paragraph(f"State: {xml_escape(shop.state)}  |  Code: {xml_escape(shop.state_code)}", s["small"]),
-    ]
-    buyer_b = [
-        Paragraph("BILL TO", s["label"]),
-        Spacer(1, 1.5*mm),
-        Paragraph(f"<b>{xml_escape(customer.name)}</b>", s["small_bold"]),
-    ]
-    if customer.address:
-        buyer_b.append(Paragraph(xml_escape(customer.address), s["small"]))
-    if customer.phone:
-        buyer_b.append(Paragraph(f"Phone: {xml_escape(customer.phone)}", s["small"]))
-    if customer.gstin:
-        buyer_b.append(Paragraph(f"<b>GSTIN: {xml_escape(customer.gstin.upper())}</b>", s["gstin"]))
-    if customer.state:
-        buyer_b.append(Paragraph(
-            f"State: {xml_escape(customer.state)}"
-            + (f"  |  Code: {xml_escape(customer.state_code)}" if customer.state_code else ""),
-            s["small"],
-        ))
- 
-    pt = Table([[seller_b, buyer_b]], colWidths=[HW, HW])
-    pt.setStyle(TableStyle([
-        ("VALIGN",        (0,0), (-1,-1), "TOP"),
-        ("BACKGROUND",    (0,0), (-1,-1), LIGHT_GRAY),
-        ("BOX",           (0,0), (0,-1),  0.5, MID_GRAY),
-        ("BOX",           (1,0), (1,-1),  0.5, MID_GRAY),
-        ("TOPPADDING",    (0,0), (-1,-1), 8),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 8),
-        ("LEFTPADDING",   (0,0), (-1,-1), 10),
-        ("RIGHTPADDING",  (0,0), (-1,-1), 10),
-    ]))
-    story.append(pt)
-    story.append(Spacer(1, 3*mm))
- 
+    story.append(ct)
+    story.append(Spacer(1, 4*mm))
+
     # ── ITEMS TABLE ──
-    # TAX INVOICE intra:  No. | Description | HSN | Qty | Rate | Amount | GST | CGST | SGST | Total
-    # TAX INVOICE inter:  No. | Description | HSN | Qty | Rate | Amount | GST | IGST | Total
-    # BILL OF SUPPLY:     No. | Description | HSN | Qty | Rate | Amount | Total
+    # TAX INVOICE intra:  S.No | Description | HSN | Qty | Price | Amount | GST% | CGST | SGST | Total
+    # TAX INVOICE inter:  S.No | Description | HSN | Qty | Price | Amount | GST% | IGST | Total
+    # BILL OF SUPPLY:     S.No | Description | Qty | Price | Amount
     if shop.has_gstin and not bill.is_igst:
-        # Intra-state: CGST + SGST
-        cw = [7*mm, 52*mm, 14*mm, 9*mm, 20*mm, 20*mm, 10*mm, 15*mm, 15*mm, 20*mm]
-        hdr = [Paragraph(f"<b>{t}</b>", s["small_bold"]) for t in
-               ["No.", "Description", "HSN", "Qty", "Rate", "Amount", "GST", "CGST", "SGST", "Total"]]
+        cw = [8*mm, 48*mm, 14*mm, 10*mm, 20*mm, 20*mm, 10*mm, 16*mm, 16*mm, 20*mm]
+        hdr = ["S.No", "Description", "HSN", "Qty", "Price", "Amount", "GST%", "CGST", "SGST", "Total"]
     elif shop.has_gstin and bill.is_igst:
-        # Inter-state: IGST
-        cw = [7*mm, 57*mm, 14*mm, 9*mm, 20*mm, 20*mm, 10*mm, 25*mm, 20*mm]
-        hdr = [Paragraph(f"<b>{t}</b>", s["small_bold"]) for t in
-               ["No.", "Description", "HSN", "Qty", "Rate", "Amount", "GST", "IGST", "Total"]]
+        cw = [8*mm, 52*mm, 14*mm, 10*mm, 22*mm, 22*mm, 10*mm, 22*mm, 22*mm]
+        hdr = ["S.No", "Description", "HSN", "Qty", "Price", "Amount", "GST%", "IGST", "Total"]
     else:
-        # Bill of supply: no tax columns
-        cw = [7*mm, 72*mm, 14*mm, 12*mm, 25*mm, 25*mm, 27*mm]
-        hdr = [Paragraph(f"<b>{t}</b>", s["small_bold"]) for t in
-               ["No.", "Description", "HSN", "Qty", "Rate", "Amount", "Total"]]
-    rows = [hdr]
+        cw = [10*mm, 82*mm, 20*mm, 30*mm, 40*mm]
+        hdr = ["S.No", "Description", "Qty", "Price", "Amount"]
+
+    rows = [[Paragraph(h, s["th"]) for h in hdr]]
 
     for idx, item in enumerate(bill.items, 1):
         qty_str = str(int(item.qty)) if item.qty == int(item.qty) else str(item.qty)
         if shop.has_gstin and not bill.is_igst:
             rows.append([
-                Paragraph(str(idx),                       s["small"]),
-                Paragraph(xml_escape(item.name),          s["small"]),
-                Paragraph(xml_escape(item.hsn),           s["small"]),
-                Paragraph(qty_str,                        s["small"]),
-                Paragraph(f"Rs.{item.price:.2f}",         s["small"]),
-                Paragraph(f"Rs.{item.amount:.2f}",        s["small"]),
-                Paragraph(f"{item.gst_rate}%",            s["small"]),
-                Paragraph(f"Rs.{item.cgst:.2f}",          s["small"]),
-                Paragraph(f"Rs.{item.sgst:.2f}",          s["small"]),
-                Paragraph(f"<b>Rs.{item.total:.2f}</b>",  s["small_bold"]),
+                Paragraph(str(idx),                       s["td"]),
+                Paragraph(xml_escape(item.name),          s["td"]),
+                Paragraph(xml_escape(str(item.hsn)),      s["td"]),
+                Paragraph(qty_str,                        s["td"]),
+                Paragraph(f"Rs.{item.price:.2f}",         s["td"]),
+                Paragraph(f"Rs.{item.amount:.2f}",        s["td"]),
+                Paragraph(f"{item.gst_rate}%",            s["td"]),
+                Paragraph(f"Rs.{item.cgst:.2f}",          s["td"]),
+                Paragraph(f"Rs.{item.sgst:.2f}",          s["td"]),
+                Paragraph(f"Rs.{item.total:.2f}",         s["td_bold"]),
             ])
         elif shop.has_gstin and bill.is_igst:
             rows.append([
-                Paragraph(str(idx),                       s["small"]),
-                Paragraph(xml_escape(item.name),          s["small"]),
-                Paragraph(xml_escape(item.hsn),           s["small"]),
-                Paragraph(qty_str,                        s["small"]),
-                Paragraph(f"Rs.{item.price:.2f}",         s["small"]),
-                Paragraph(f"Rs.{item.amount:.2f}",        s["small"]),
-                Paragraph(f"{item.gst_rate}%",            s["small"]),
-                Paragraph(f"Rs.{item.igst:.2f}",          s["small"]),
-                Paragraph(f"<b>Rs.{item.total:.2f}</b>",  s["small_bold"]),
+                Paragraph(str(idx),                       s["td"]),
+                Paragraph(xml_escape(item.name),          s["td"]),
+                Paragraph(xml_escape(str(item.hsn)),      s["td"]),
+                Paragraph(qty_str,                        s["td"]),
+                Paragraph(f"Rs.{item.price:.2f}",         s["td"]),
+                Paragraph(f"Rs.{item.amount:.2f}",        s["td"]),
+                Paragraph(f"{item.gst_rate}%",            s["td"]),
+                Paragraph(f"Rs.{item.igst:.2f}",          s["td"]),
+                Paragraph(f"Rs.{item.total:.2f}",         s["td_bold"]),
             ])
         else:
             rows.append([
-                Paragraph(str(idx),                       s["small"]),
-                Paragraph(xml_escape(item.name),          s["small"]),
-                Paragraph(xml_escape(item.hsn),           s["small"]),
-                Paragraph(qty_str,                        s["small"]),
-                Paragraph(f"Rs.{item.price:.2f}",         s["small"]),
-                Paragraph(f"Rs.{item.amount:.2f}",        s["small"]),
-                Paragraph(f"<b>Rs.{item.total:.2f}</b>",  s["small_bold"]),
+                Paragraph(str(idx),                       s["td"]),
+                Paragraph(xml_escape(item.name),          s["td"]),
+                Paragraph(qty_str,                        s["td"]),
+                Paragraph(f"Rs.{item.price:.2f}",         s["td"]),
+                Paragraph(f"Rs.{item.amount:.2f}",        s["td_bold"]),
             ])
- 
+
     it = Table(rows, colWidths=cw, repeatRows=1)
     it.setStyle(TableStyle([
+        # Header row
         ("BACKGROUND",     (0,0), (-1,0),  BRAND_DARK),
         ("TEXTCOLOR",      (0,0), (-1,0),  WHITE),
-        ("FONTNAME",       (0,0), (-1,0),  "Helvetica-Bold"),
+        # Body
         ("FONTSIZE",       (0,0), (-1,-1), 8),
-        ("TOPPADDING",     (0,0), (-1,-1), 4),
-        ("BOTTOMPADDING",  (0,0), (-1,-1), 4),
-        ("LEFTPADDING",    (0,0), (-1,-1), 3),
-        ("RIGHTPADDING",   (0,0), (-1,-1), 3),
+        ("TOPPADDING",     (0,0), (-1,-1), 5),
+        ("BOTTOMPADDING",  (0,0), (-1,-1), 5),
+        ("LEFTPADDING",    (0,0), (-1,-1), 4),
+        ("RIGHTPADDING",   (0,0), (-1,-1), 4),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [WHITE, LIGHT_GRAY]),
-        ("GRID",           (0,0), (-1,-1), 0.3, MID_GRAY),
+        # Grid
+        ("LINEBELOW",      (0,0), (-1,0),  1, BRAND_BLUE),
+        ("LINEBELOW",      (0,1), (-1,-1), 0.25, MID_GRAY),
         ("BOX",            (0,0), (-1,-1), 0.5, MID_GRAY),
-        ("ALIGN",          (0,0), (0,-1),  "CENTER"),
-        ("ALIGN",          (2,0), (2,-1),  "CENTER"),
-        ("ALIGN",          (3,0), (-1,-1), "RIGHT"),
+        # Alignment
+        ("ALIGN",          (0,0), (0,-1),  "CENTER"),  # S.No
+        ("ALIGN",          (2,0), (-1,-1), "RIGHT"),   # numeric columns
         ("VALIGN",         (0,0), (-1,-1), "MIDDLE"),
     ]))
     story.append(it)
     story.append(Spacer(1, 3*mm))
- 
+
     # ── TOTALS ──
-    TL = 110*mm
-    TM = 42*mm
-    TR = 30*mm
- 
-    # Show GST breakdown only for TAX INVOICE (registered shops)
+    TL = 112*mm   # spacer
+    TM = 40*mm    # label
+    TR = 30*mm    # value
+
     if shop.has_gstin and not bill.is_igst:
-        # Intra-state: CGST + SGST breakdown
         totals_data = [
-            ["", Paragraph("Subtotal",       s["total_label"]), Paragraph(f"Rs.{bill.subtotal:.2f}",   s["total_right"])],
-            ["", Paragraph("CGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_cgst:.2f}", s["total_right"])],
-            ["", Paragraph("SGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_sgst:.2f}", s["total_right"])],
-            ["", Paragraph("Total GST",      s["total_label"]), Paragraph(f"Rs.{bill.total_gst:.2f}",  s["total_right"])],
+            ["", Paragraph("Subtotal",       s["total_label"]), Paragraph(f"Rs.{bill.subtotal:.2f}",   s["total_value"])],
+            ["", Paragraph("CGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_cgst:.2f}", s["total_value"])],
+            ["", Paragraph("SGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_sgst:.2f}", s["total_value"])],
+            ["", Paragraph("Total GST",      s["total_label"]), Paragraph(f"Rs.{bill.total_gst:.2f}",  s["total_value"])],
         ]
     elif shop.has_gstin and bill.is_igst:
-        # Inter-state: IGST breakdown
         totals_data = [
-            ["", Paragraph("Subtotal",       s["total_label"]), Paragraph(f"Rs.{bill.subtotal:.2f}",   s["total_right"])],
-            ["", Paragraph("IGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_igst:.2f}", s["total_right"])],
-            ["", Paragraph("Total GST",      s["total_label"]), Paragraph(f"Rs.{bill.total_gst:.2f}",  s["total_right"])],
+            ["", Paragraph("Subtotal",       s["total_label"]), Paragraph(f"Rs.{bill.subtotal:.2f}",   s["total_value"])],
+            ["", Paragraph("IGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_igst:.2f}", s["total_value"])],
+            ["", Paragraph("Total GST",      s["total_label"]), Paragraph(f"Rs.{bill.total_gst:.2f}",  s["total_value"])],
         ]
     else:
-        # BILL OF SUPPLY — no GST breakdown
-        totals_data = [
-            ["", Paragraph("Subtotal", s["total_label"]), Paragraph(f"Rs.{bill.subtotal:.2f}", s["total_right"])],
-        ]
- 
-    tt = Table(totals_data, colWidths=[TL, TM, TR])
-    tt.setStyle(TableStyle([
-        ("FONTSIZE",      (0,0), (-1,-1), 9),
-        ("TOPPADDING",    (0,0), (-1,-1), 3),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-        ("RIGHTPADDING",  (-1,0),(-1,-1), 4),
-        ("LINEABOVE",     (1,0), (-1,0),  0.5, MID_GRAY),
-        ("LINEBELOW",     (1,-1),(-1,-1), 1.0, MID_GRAY),
-    ]))
-    story.append(tt)
- 
+        totals_data = []
+
+    if totals_data:
+        tt = Table(totals_data, colWidths=[TL, TM, TR])
+        tt.setStyle(TableStyle([
+            ("TOPPADDING",    (0,0), (-1,-1), 2),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+            ("RIGHTPADDING",  (-1,0),(-1,-1), 4),
+            ("LINEBELOW",     (1,-1),(-1,-1), 0.5, MID_GRAY),
+        ]))
+        story.append(tt)
+
     # ── GRAND TOTAL ──
-    GW = 110*mm
     gt = Table([[
-        Paragraph(f"<b>Amount in words:</b><br/><i>{bill.in_words}</i>", s["words"]),
-        Paragraph("GRAND TOTAL", s["grand_label"]),
+        Paragraph(f"GRAND TOTAL", s["grand_label"]),
         Paragraph(f"Rs.{bill.grand_total:.2f}", s["grand_value"]),
-    ]], colWidths=[GW, TM, TR])
+    ]], colWidths=[TL + TM, TR])
     gt.setStyle(TableStyle([
-        ("BACKGROUND",    (1,0), (-1,-1), BRAND_BLUE),
-        ("BACKGROUND",    (0,0), (0,-1),  LIGHT_GRAY),
+        ("BACKGROUND",    (0,0), (-1,-1), BRAND_BLUE),
         ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
-        ("ALIGN",         (1,0), (-1,-1), "RIGHT"),
         ("TOPPADDING",    (0,0), (-1,-1), 8),
         ("BOTTOMPADDING", (0,0), (-1,-1), 8),
-        ("LEFTPADDING",   (0,0), (0,-1),  10),
-        ("RIGHTPADDING",  (-1,0),(-1,-1), 4),
-        ("BOX",           (0,0), (-1,-1), 0.5, MID_GRAY),
+        ("LEFTPADDING",   (0,0), (-1,-1), 10),
+        ("RIGHTPADDING",  (-1,0),(-1,-1), 6),
     ]))
     story.append(gt)
-    story.append(Spacer(1, 5*mm))
- 
-    # ── UPI ──
-    if shop.upi:
-        ut = Table([[
-            Paragraph(f"<b>Pay via UPI:</b>  {shop.upi}", s["small"]),
-            Paragraph("Computer generated invoice.<br/>No physical signature required.", s["sig"]),
-        ]], colWidths=[HW, HW])
-        ut.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0), (-1,-1), LIGHT_GRAY),
-            ("BOX",           (0,0), (-1,-1), 0.5, MID_GRAY),
-            ("TOPPADDING",    (0,0), (-1,-1), 6),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-            ("LEFTPADDING",   (0,0), (-1,-1), 10),
-            ("RIGHTPADDING",  (0,0), (-1,-1), 10),
-            ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
-        ]))
-        story.append(ut)
-        story.append(Spacer(1, 4*mm))
- 
-    # ── FOOTER ──
-    story.append(HRFlowable(width="100%", thickness=0.5, color=MID_GRAY, spaceAfter=2*mm))
+    story.append(Spacer(1, 2*mm))
+
+    # ── AMOUNT IN WORDS ──
+    story.append(Paragraph(f"<b>Amount in words:</b>  <i>{bill.in_words}</i>", s["words"]))
+    story.append(Spacer(1, 8*mm))
+
+    # ── FOOTER: Terms + Powered by ──
+    story.append(HRFlowable(width="100%", thickness=0.5, color=MID_GRAY, spaceAfter=3*mm))
+
+    terms_text = (
+        "1. Goods once sold will not be taken back or exchanged.  "
+        "2. All disputes subject to local jurisdiction.  "
+        "3. E&amp;OE — Errors and omissions excepted."
+    )
+    story.append(Paragraph("Terms &amp; Conditions:", s["label"]))
+    story.append(Spacer(1, 1*mm))
+    story.append(Paragraph(terms_text, s["terms"]))
+    story.append(Spacer(1, 4*mm))
+    story.append(Paragraph(f"Powered by {PLATFORM_NAME}", s["powered"]))
     story.append(Paragraph(
-        f"{PLATFORM_NAME}  |  {PLATFORM_TAGLINE}  |  Support: {PLATFORM_SUPPORT}",
-        s["footer"]
-    ))
-    story.append(Paragraph(
-        "This invoice was generated automatically by BilledUp. Subject to Hyderabad jurisdiction.",
-        s["footer"]
+        "Computer generated invoice. No physical signature required.",
+        s["footer"],
     ))
  
     try:

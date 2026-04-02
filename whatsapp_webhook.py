@@ -80,6 +80,7 @@ app = Flask(__name__)
 # ASKED_NAME    → we asked for shop name
 # ASKED_ADDRESS → we asked for address
 # ASKED_GSTIN   → we asked for GSTIN (optional)
+# ASKED_STATE   → we asked which Indian state the shop is in
 # ACTIVE        → registered and billing
 # EXPIRED       → trial ended
 # ════════════════════════════════════════════════
@@ -100,7 +101,10 @@ def get_registration(phone: str) -> dict | None:
             "phone": row.phone, "shop_name": row.shop_name,
             "address": row.address, "gstin": row.gstin,
             "invoice_type": row.invoice_type or "TAX_INVOICE",
-            "state": row.state, "trial_start": row.trial_start.isoformat() if row.trial_start else None,
+            "state": row.state,
+            "state_name": row.state_name or "",
+            "state_code": row.state_code or "",
+            "trial_start": row.trial_start.isoformat() if row.trial_start else None,
             "trial_end": row.trial_end.isoformat() if row.trial_end else None,
             "active": row.active, "bills_count": row.bills_count,
         }
@@ -108,6 +112,7 @@ def get_registration(phone: str) -> dict | None:
 
 ALLOWED_REG_FIELDS = {
     "shop_name", "address", "gstin", "invoice_type", "state",
+    "state_name", "state_code",
     "trial_start", "trial_end", "active", "bills_count",
 }
 
@@ -154,7 +159,8 @@ def days_left(reg: dict) -> int:
     return max(0, delta.days)
 
 
-def activate_trial(phone: str, shop_name: str, address: str, gstin: str = ""):
+def activate_trial(phone: str, shop_name: str, address: str, gstin: str = "",
+                    state_name: str = "Telangana", state_code: str = "36"):
     """
     Activate 10 day free trial for a new shopkeeper.
     Creates shop in database and marks registration active.
@@ -185,8 +191,8 @@ def activate_trial(phone: str, shop_name: str, address: str, gstin: str = ""):
                 gstin      = gstin or PLACEHOLDER_GSTIN,
                 phone      = phone.replace("whatsapp:", ""),
                 upi        = "",
-                state      = "Telangana",
-                state_code = "36",
+                state      = state_name,
+                state_code = state_code,
                 api_key    = api_key,
             ))
         else:
@@ -200,6 +206,8 @@ def activate_trial(phone: str, shop_name: str, address: str, gstin: str = ""):
         gstin        = gstin,
         invoice_type = invoice_type,
         state        = "ACTIVE",
+        state_name   = state_name,
+        state_code   = state_code,
         trial_start  = trial_start.isoformat(),
         trial_end    = trial_end.isoformat(),
         active       = True,
@@ -248,7 +256,37 @@ def msg_ask_gstin() -> str:
     )
 
 
-def msg_activated(shop_name: str, days: int, api_key: str = "", invoice_type: str = "TAX_INVOICE") -> str:
+# ── State selection menu (maps menu number → GST state code) ──
+_STATE_MENU = [
+    ("37", "Andhra Pradesh"),
+    ("07", "Delhi"),
+    ("24", "Gujarat"),
+    ("29", "Karnataka"),
+    ("32", "Kerala"),
+    ("27", "Maharashtra"),
+    ("23", "Madhya Pradesh"),
+    ("03", "Punjab"),
+    ("08", "Rajasthan"),
+    ("33", "Tamil Nadu"),
+    ("36", "Telangana"),
+    ("09", "Uttar Pradesh"),
+    ("19", "West Bengal"),
+]
+
+
+def msg_ask_state() -> str:
+    lines = ["🏪 Almost there! One last thing.\n"]
+    lines.append("Which state is your shop in?\n")
+    lines.append("Reply with your state number:\n")
+    for i, (_, name) in enumerate(_STATE_MENU, 1):
+        lines.append(f"{i}. {name}")
+    lines.append("14. Other states (type your state name)")
+    lines.append("\nThis ensures your GST (CGST/SGST) is calculated correctly.")
+    return "\n".join(lines)
+
+
+def msg_activated(shop_name: str, days: int, api_key: str = "",
+                  invoice_type: str = "TAX_INVOICE", state_name: str = "") -> str:
     key_line = f"\n🔑 *Your API Key:*\n`{api_key}`\n_Keep this safe — use it for API access._\n" if api_key else ""
     if invoice_type == "BILL_OF_SUPPLY":
         bill_type_line = (
@@ -257,9 +295,11 @@ def msg_activated(shop_name: str, days: int, api_key: str = "", invoice_type: st
         )
     else:
         bill_type_line = "✅ Your bills will include GST (*Tax Invoice*).\n"
+    state_line = f"📍 Shop state: {state_name} (for GST calculation)\n" if state_name else ""
     return (
         f"🎊 *You are all set, {shop_name}!*\n\n"
         f"{bill_type_line}\n"
+        f"{state_line}"
         f"Your *{days}-day free trial* has started.\n"
         f"After trial: just Rs.299/month.\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
@@ -295,6 +335,8 @@ def msg_help(shop_name: str, days: int) -> str:
         f"• *history* — Last 5 bills\n"
         f"• *gst report* — This month's GST summary\n"
         f"• *gst report last 7 days* — Custom range\n"
+        f"• *myitems* — Your saved items & GST rates\n"
+        f"• *gst <item> <rate>* — Fix an item's GST rate\n"
         f"• *help* — This message\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
         f"*Support:*\n"
@@ -918,11 +960,11 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
         # Load shop for state defaults
         shop = get_shop(shop_id)
         if shop:
-            shop_state      = shop.state
-            shop_state_code = shop.state_code
+            shop_state      = shop.state or reg.get("state_name", "")
+            shop_state_code = shop.state_code or reg.get("state_code", "")
         else:
-            shop_state      = "Telangana"
-            shop_state_code = "36"
+            shop_state      = reg.get("state_name", "")
+            shop_state_code = reg.get("state_code", "")
 
         # Determine invoice type from registration
         is_bos = reg.get("invoice_type") == "BILL_OF_SUPPLY"
@@ -936,7 +978,7 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
                 item["gst_confidence"] = "high"
             else:
                 try:
-                    rate_info = get_gst_rate_smart(item["name"], get_anthropic_client())
+                    rate_info = get_gst_rate_smart(item["name"], get_anthropic_client(), shop_id=shop_id)
                 except Exception as e:
                     log.warning(f"GST lookup failed for '{item['name']}': {e}")
                     rate_info = {"hsn": "9999", "gst": 18, "source": "default", "confidence": "low"}
@@ -1299,6 +1341,18 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
                 f"Please keep this invoice number and contact support: +91 7981053846"
             )
 
+        # Auto-save items to shop item master (confirmed=True)
+        try:
+            from database import save_item_master
+            for item in bill_result.items:
+                save_item_master(
+                    pending.shop_id, item.name,
+                    item.hsn, item.gst_rate,
+                    confirmed=True,
+                )
+        except Exception as e:
+            log.error(f"Item master save failed (non-fatal): {e}")
+
         # Update bill count
         try:
             upsert_registration(
@@ -1340,6 +1394,83 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
         send(from_number,
             f"❌ Something went wrong. Please try again.\n\n"
             f"Support: +91 7981053846"
+        )
+
+
+# ════════════════════════════════════════════════
+# ITEM MASTER COMMANDS
+# ════════════════════════════════════════════════
+
+def _handle_myitems(from_number: str, shop_id: str):
+    """Show top 20 saved items for the shop."""
+    from database import get_top_items
+    items = get_top_items(shop_id, limit=20)
+    if not items:
+        send(from_number,
+            "📦 No items saved yet.\n\n"
+            "Items are saved automatically when you confirm a bill.\n"
+            "The more bills you generate, the faster & more accurate your GST becomes!"
+        )
+        return
+
+    lines = ["📦 *Your Saved Items*\n"]
+    for i, item in enumerate(items, 1):
+        status = "✅" if item["confirmed"] else "⚠️"
+        lines.append(
+            f"{i}. {status} {item['item_name'].title()} — "
+            f"HSN: {item['hsn']} | GST: {item['gst_rate']}% "
+            f"({item['use_count']}x)"
+        )
+    lines.append(
+        "\n✅ = confirmed  ⚠️ = auto-detected\n"
+        "To fix GST: type *gst <item> <rate>*\n"
+        "_Example: gst shirt 5_"
+    )
+    send(from_number, "\n".join(lines))
+
+
+def _handle_gst_update(from_number: str, message: str, shop_id: str):
+    """Handle 'gst <item> <rate>' command to update an item's GST rate."""
+    from database import update_item_gst, save_item_master
+    # Parse: "gst shirt 5" or "gst phone case 18"
+    parts = message.strip().split()
+    if len(parts) < 3:
+        send(from_number,
+            "Usage: *gst <item name> <rate>*\n"
+            "_Example: gst shirt 5_\n"
+            "_Example: gst phone case 18_"
+        )
+        return
+
+    try:
+        rate = int(parts[-1])
+    except ValueError:
+        send(from_number, "❌ Rate must be a number.\n_Example: gst shirt 5_")
+        return
+
+    valid_slabs = [0, 3, 5, 12, 18, 28]
+    if rate not in valid_slabs:
+        send(from_number,
+            f"❌ Invalid GST rate: {rate}%\n"
+            f"Valid rates: {', '.join(str(s) + '%' for s in valid_slabs)}"
+        )
+        return
+
+    item_name = " ".join(parts[1:-1])
+    if update_item_gst(shop_id, item_name, rate):
+        send(from_number,
+            f"✅ Updated *{item_name.title()}* → GST {rate}%\n"
+            f"Future bills will use this rate automatically."
+        )
+    else:
+        # Item not in master yet — create it confirmed with default HSN
+        from gst_rates import get_gst_rate
+        existing = get_gst_rate(item_name)
+        hsn = existing.get("hsn", "9999")
+        save_item_master(shop_id, item_name, hsn, rate, confirmed=True)
+        send(from_number,
+            f"✅ Saved *{item_name.title()}* — HSN: {hsn} | GST: {rate}%\n"
+            f"Future bills will use this rate automatically."
         )
 
 
@@ -1394,14 +1525,10 @@ def handle_message(from_number: str, message: str):
 
     # ── STATE: ASKED_GSTIN — waiting for GSTIN or skip ──
     if state == "ASKED_GSTIN":
-        shop_name = reg.get("shop_name", "Your Shop")
-        address   = reg.get("address", "")
-
         if msg_lower == "skip":
-            # Skip GSTIN — Bill of Supply (no GST)
-            shop_id, api_key = activate_trial(from_number, shop_name, address, "")
-            d_left  = days_left(get_registration(from_number))
-            send(from_number, msg_activated(shop_name, d_left, api_key, invoice_type="BILL_OF_SUPPLY"))
+            # Skip GSTIN — move to state selection
+            if send(from_number, msg_ask_state()):
+                upsert_registration(from_number, gstin="", state="ASKED_STATE")
             return
 
         gstin = message.strip().upper()
@@ -1409,10 +1536,75 @@ def handle_message(from_number: str, message: str):
             send(from_number, msg_invalid_gstin())
             return
 
-        # Valid GSTIN — Tax Invoice (GST applied)
-        shop_id, api_key = activate_trial(from_number, shop_name, address, gstin)
-        d_left  = days_left(get_registration(from_number))
-        send(from_number, msg_activated(shop_name, d_left, api_key, invoice_type="TAX_INVOICE"))
+        # Valid GSTIN — save and move to state selection
+        if send(from_number, msg_ask_state()):
+            upsert_registration(from_number, gstin=gstin, state="ASKED_STATE")
+        return
+
+    # ── STATE: ASKED_STATE — waiting for shop state ──
+    if state == "ASKED_STATE":
+        shop_name = reg.get("shop_name", "Your Shop")
+        address   = reg.get("address", "")
+        gstin     = reg.get("gstin", "")
+
+        chosen_state = None
+        chosen_code  = None
+
+        # Check if user sent a menu number (1-13)
+        if msg_lower.isdigit():
+            idx = int(msg_lower)
+            if 1 <= idx <= len(_STATE_MENU):
+                chosen_code, chosen_state = _STATE_MENU[idx - 1]
+            elif idx == 14:
+                # "Other states" — ask them to type the name
+                send(from_number, "Please type your state name.\n_Example: Goa_")
+                return
+
+        # Not a menu number — try fuzzy matching the typed state name
+        if not chosen_state:
+            # Try resolve_state (exact code, exact name, partial match)
+            resolved = resolve_state(message.strip())
+            if resolved:
+                chosen_state, chosen_code = resolved
+            else:
+                # Fuzzy match against INDIAN_STATES values
+                try:
+                    from rapidfuzz import process as rfprocess, fuzz as rffuzz
+                    state_names = list(INDIAN_STATES.values())
+                    match = rfprocess.extractOne(
+                        message.strip(), state_names,
+                        scorer=rffuzz.WRatio, score_cutoff=60,
+                    )
+                    if match:
+                        matched_name = match[0]
+                        # Find code for matched name
+                        for code, name in INDIAN_STATES.items():
+                            if name == matched_name:
+                                chosen_state, chosen_code = name, code
+                                break
+                except ImportError:
+                    pass
+
+                if not chosen_state:
+                    # Unrecognized — use typed name with unknown code
+                    chosen_state = message.strip().title()
+                    chosen_code  = "99"
+                    send(from_number,
+                        f"⚠️ Could not match \"{message.strip()}\" to a known state. "
+                        f"Using *{chosen_state}* — you can update this later."
+                    )
+
+        # Activate with the chosen state
+        invoice_type = "TAX_INVOICE" if gstin else "BILL_OF_SUPPLY"
+        shop_id, api_key = activate_trial(
+            from_number, shop_name, address, gstin,
+            state_name=chosen_state, state_code=chosen_code,
+        )
+        d_left = days_left(get_registration(from_number))
+        send(from_number, msg_activated(
+            shop_name, d_left, api_key,
+            invoice_type=invoice_type, state_name=chosen_state,
+        ))
         return
 
     # ── STATE: ACTIVE — registered shopkeeper ──
@@ -1442,6 +1634,14 @@ def handle_message(from_number: str, message: str):
 
         if msg_lower.startswith("gst report"):
             _handle_gst_report(from_number, msg_lower, shop_id, shop_name)
+            return
+
+        if msg_lower in ("myitems", "my items", "items"):
+            _handle_myitems(from_number, shop_id)
+            return
+
+        if msg_lower.startswith("gst ") and not msg_lower.startswith("gst report"):
+            _handle_gst_update(from_number, message, shop_id)
             return
 
         if msg_lower in ("hi", "hello", "hai", "start"):

@@ -753,31 +753,31 @@ def test_clothing_slab_below_1000():
     assert adjusted["hsn"] == "6205"  # HSN unchanged
 
 
-def test_clothing_slab_at_1000():
-    """Clothing at exactly ₹1000 → 5% GST."""
+def test_clothing_slab_at_2500():
+    """Clothing at exactly ₹2500 → 5% GST."""
     rate = {"hsn": "6205", "gst": 12, "source": "exact"}
-    adjusted = adjust_gst_for_price("shirt", 1000, rate)
+    adjusted = adjust_gst_for_price("shirt", 2500, rate)
     assert adjusted["gst"] == 5
 
 
-def test_clothing_slab_above_1000():
-    """Clothing >₹1000 → 12% GST."""
+def test_clothing_slab_above_2500():
+    """Clothing >₹2500 → 18% GST (56th GST Council)."""
     rate = {"hsn": "6205", "gst": 12, "source": "exact"}
-    adjusted = adjust_gst_for_price("shirt", 1500, rate)
-    assert adjusted["gst"] == 12
+    adjusted = adjust_gst_for_price("shirt", 3000, rate)
+    assert adjusted["gst"] == 18
 
 
-def test_footwear_slab_below_1000():
-    """Footwear ≤₹1000 → 5% GST."""
+def test_footwear_slab_below_2500():
+    """Footwear ≤₹2500 → 5% GST."""
     rate = {"hsn": "6403", "gst": 18, "source": "exact"}
     adjusted = adjust_gst_for_price("shoes", 800, rate)
     assert adjusted["gst"] == 5
 
 
-def test_footwear_slab_above_1000():
-    """Footwear >₹1000 → 18% GST."""
+def test_footwear_slab_above_2500():
+    """Footwear >₹2500 → 18% GST."""
     rate = {"hsn": "6403", "gst": 18, "source": "exact"}
-    adjusted = adjust_gst_for_price("shoes", 2500, rate)
+    adjusted = adjust_gst_for_price("shoes", 3000, rate)
     assert adjusted["gst"] == 18
 
 
@@ -809,7 +809,7 @@ def test_is_clothing_item_variants():
     assert is_clothing_item("cotton shirt") is True
     assert is_clothing_item("tshirt") is True
     assert is_clothing_item("jeans") is True
-    assert is_clothing_item("saree") is True
+    assert is_clothing_item("saree") is False  # unstitched fabric, not clothing
     assert is_clothing_item("pant") is True
     assert is_clothing_item("mobile") is False
     assert is_clothing_item("charger") is False
@@ -884,16 +884,16 @@ def test_gold_gst_rate():
 
 
 def test_clothing_bill_calculation_slab():
-    """End-to-end: cheap shirt gets 5%, expensive shirt gets 12%."""
+    """End-to-end: cheap shirt gets 5%, expensive shirt gets 18% (56th GST Council)."""
     cheap = [BillItem("shirt", 1, 800)]
     br_cheap = calculate_bill(cheap, gst_client=None)
     assert br_cheap.items[0].gst_rate == 5
     assert br_cheap.total_gst == 40.0  # 5% of 800
 
-    expensive = [BillItem("shirt", 1, 1500)]
+    expensive = [BillItem("shirt", 1, 3000)]
     br_exp = calculate_bill(expensive, gst_client=None)
-    assert br_exp.items[0].gst_rate == 12
-    assert br_exp.total_gst == 180.0  # 12% of 1500
+    assert br_exp.items[0].gst_rate == 18
+    assert br_exp.total_gst == 540.0  # 18% of 3000
 
 
 # ── Expanded keyword & confidence tests ──
@@ -1105,21 +1105,24 @@ def test_exchange_return_still_detected():
 
 
 def test_tracksuit_gst_clothing():
-    """Tracksuit should be clothing with correct GST (Priority 3 fix)."""
+    """Tracksuit should be clothing with correct GST (56th GST Council)."""
     from gst_rates import get_gst_rate_smart, is_clothing_item, adjust_gst_for_price
     assert is_clothing_item("tracksuit") is True
     rate = get_gst_rate_smart("tracksuit")
     adjusted = adjust_gst_for_price("tracksuit", 2000, rate)
-    assert adjusted["gst"] == 12  # >₹1000 clothing
+    assert adjusted["gst"] == 5  # ≤₹2500 clothing
+
+    adjusted_expensive = adjust_gst_for_price("tracksuit", 3000, rate)
+    assert adjusted_expensive["gst"] == 18  # >₹2500 clothing
 
 
 def test_lehenga_gst_clothing():
-    """Lehenga should be clothing with correct GST (Priority 3 fix)."""
+    """Lehenga should be clothing with correct GST (56th GST Council)."""
     from gst_rates import get_gst_rate_smart, is_clothing_item, adjust_gst_for_price
     assert is_clothing_item("lehenga") is True
     rate = get_gst_rate_smart("lehenga")
     adjusted = adjust_gst_for_price("lehenga", 5000, rate)
-    assert adjusted["gst"] == 12  # >₹1000 clothing
+    assert adjusted["gst"] == 18  # >₹2500 clothing
 
 
 def test_kids_frock_gst_clothing():

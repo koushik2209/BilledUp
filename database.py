@@ -49,8 +49,8 @@ class Shop(Base):
     gstin      = Column(String(20), nullable=False)
     phone      = Column(String(20), nullable=False)
     upi        = Column(String(100), default="")
-    state      = Column(String(50), default="Telangana")
-    state_code = Column(String(5), default="36")
+    state      = Column(String(50), default="")
+    state_code = Column(String(5), default="")
     api_key    = Column(String(64), unique=True, nullable=True, index=True)
     active     = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -110,6 +110,8 @@ class Registration(Base):
     gstin        = Column(String(20), default="")
     invoice_type = Column(String(20), default="TAX_INVOICE")
     state        = Column(String(20), default="NEW")
+    state_name   = Column(String(50), default="")
+    state_code   = Column(String(5), default="")
     trial_start  = Column(DateTime, nullable=True)
     trial_end    = Column(DateTime, nullable=True)
     active       = Column(Boolean, default=False)
@@ -144,6 +146,23 @@ class ReportPDF(Base):
     shop_id    = Column(String(50), nullable=False, index=True)
     pdf_data   = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ShopItemMaster(Base):
+    __tablename__ = "shop_item_master"
+    __table_args__ = (
+        Index("ix_shop_item_master_shop_item", "shop_id", "item_name", unique=True),
+    )
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    shop_id    = Column(String(50), nullable=False, index=True)
+    item_name  = Column(String(200), nullable=False)
+    hsn        = Column(String(20), nullable=False)
+    gst_rate   = Column(Integer, nullable=False)
+    confirmed  = Column(Boolean, default=False)
+    use_count  = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 # ════════════════════════════════════════════════
@@ -229,3 +248,79 @@ def validate_api_key(api_key: str) -> Shop | None:
             # Detach from session so it can be used outside
             session.expunge(shop)
         return shop
+
+
+# ════════════════════════════════════════════════
+# SHOP ITEM MASTER
+# ════════════════════════════════════════════════
+
+def get_item_master(shop_id: str, item_name: str) -> dict | None:
+    """Get a shop's saved item by name. Returns dict or None."""
+    name = item_name.lower().strip()
+    with db_session() as session:
+        row = session.query(ShopItemMaster).filter_by(
+            shop_id=shop_id, item_name=name,
+        ).first()
+        if not row:
+            return None
+        return {
+            "item_name": row.item_name,
+            "hsn": row.hsn,
+            "gst_rate": row.gst_rate,
+            "confirmed": row.confirmed,
+            "use_count": row.use_count,
+        }
+
+
+def save_item_master(shop_id: str, item_name: str, hsn: str, gst_rate: int,
+                     confirmed: bool = False):
+    """Upsert an item in the shop's item master. Increments use_count."""
+    name = item_name.lower().strip()
+    with db_session() as session:
+        row = session.query(ShopItemMaster).filter_by(
+            shop_id=shop_id, item_name=name,
+        ).first()
+        if row:
+            row.hsn = hsn
+            row.gst_rate = gst_rate
+            if confirmed:
+                row.confirmed = True
+            row.use_count += 1
+        else:
+            session.add(ShopItemMaster(
+                shop_id=shop_id, item_name=name,
+                hsn=hsn, gst_rate=gst_rate,
+                confirmed=confirmed, use_count=1,
+            ))
+
+
+def get_top_items(shop_id: str, limit: int = 20) -> list[dict]:
+    """Get top items by use_count for a shop."""
+    with db_session() as session:
+        rows = session.query(ShopItemMaster).filter_by(
+            shop_id=shop_id,
+        ).order_by(ShopItemMaster.use_count.desc()).limit(limit).all()
+        return [
+            {
+                "item_name": r.item_name,
+                "hsn": r.hsn,
+                "gst_rate": r.gst_rate,
+                "confirmed": r.confirmed,
+                "use_count": r.use_count,
+            }
+            for r in rows
+        ]
+
+
+def update_item_gst(shop_id: str, item_name: str, gst_rate: int) -> bool:
+    """Update GST rate for an existing item and mark confirmed. Returns True if found."""
+    name = item_name.lower().strip()
+    with db_session() as session:
+        row = session.query(ShopItemMaster).filter_by(
+            shop_id=shop_id, item_name=name,
+        ).first()
+        if not row:
+            return False
+        row.gst_rate = gst_rate
+        row.confirmed = True
+        return True

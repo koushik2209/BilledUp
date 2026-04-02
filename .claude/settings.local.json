@@ -6,7 +6,13 @@
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(pip install:*)",
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "Bash(./venv/Scripts/python.exe -m pytest tests/ -v)",
+      "Bash(ls ./venv/Scripts/python*)",
+      "Bash(pip --version)",
+      "Bash(xxd /c/Users/velag/Desktop/gst_billing/Procfile)",
+      "Bash(./venv/Scripts/python.exe -m pytest tests/ -v --tb=short)",
+      "Bash(git remote:*)"
     ]
   }
 }

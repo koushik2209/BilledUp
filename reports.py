@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from sqlalchemy import func
 
 from database import db_session, Bill
-from config import BILLS_FOLDER, PLATFORM_NAME
+from config import PLATFORM_NAME
 
 log = logging.getLogger("billedup.reports")
 
@@ -271,15 +271,14 @@ def export_gst_report_pdf(report: GSTReport, label: str, shop_name: str = "") ->
     Generate a clean PDF summary of the GST report.
     Returns the file path.
     """
-    reports_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
-    os.makedirs(reports_folder, exist_ok=True)
+    from io import BytesIO
 
     safe_label = re.sub(r"[^a-zA-Z0-9_-]", "_", label)
     filename = f"GST_Report_{report.shop_id}_{safe_label}.pdf"
-    filepath = os.path.join(reports_folder, filename)
 
+    buffer = BytesIO()
     doc = SimpleDocTemplate(
-        filepath,
+        buffer,
         pagesize=A4,
         leftMargin=20 * mm,
         rightMargin=20 * mm,
@@ -394,5 +393,6 @@ def export_gst_report_pdf(report: GSTReport, label: str, shop_name: str = "") ->
     ))
 
     doc.build(elements)
-    log.info(f"GST report PDF saved: {filepath}")
-    return filepath
+    pdf_bytes = buffer.getvalue()
+    log.info(f"GST report PDF generated: {filename} ({len(pdf_bytes) / 1024:.1f} KB)")
+    return pdf_bytes, filename

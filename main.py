@@ -96,12 +96,12 @@ def save_bill(
     customer_phone: str,
     items:          list,
     bill_result,
-    pdf_path:       str,
+    pdf_data:       bytes,
     raw_message:    str = "",
     confidence:     float = 1.0,
     is_return:      bool = False,
 ):
-    """Persist bill to database."""
+    """Persist bill to database (including PDF bytes)."""
     items_data = [
         {
             "name":     i.name,
@@ -116,6 +116,7 @@ def save_bill(
         }
         for i in items
     ]
+    pdf_filename = f"{invoice_number}.pdf"
     with db_session() as session:
         session.add(Bill(
             invoice_number = invoice_number,
@@ -131,7 +132,8 @@ def save_bill(
             grand_total    = bill_result.grand_total,
             is_igst        = bill_result.is_igst,
             is_return      = is_return,
-            pdf_path       = pdf_path,
+            pdf_path       = pdf_filename,
+            pdf_data       = pdf_data,
             raw_message    = raw_message,
             confidence     = confidence,
         ))
@@ -215,18 +217,6 @@ def validate_environment() -> bool:
         issues.append("ANTHROPIC_API_KEY looks invalid")
     else:
         print("  API key       OK")
-
-    # Check bills folder writable
-    from config import BILLS_FOLDER
-    try:
-        os.makedirs(BILLS_FOLDER, exist_ok=True)
-        test_file = os.path.join(BILLS_FOLDER, ".write_test")
-        with open(test_file, "w") as f:
-            f.write("test")
-        os.remove(test_file)
-        print("  Bills folder  OK")
-    except Exception as e:
-        issues.append(f"Bills folder not writable: {e}")
 
     # Check database
     try:
@@ -312,7 +302,7 @@ def generate_bill_from_message(
     # ── Step 3: Generate PDF ──
     try:
         invoice_number = generate_invoice_number(shop.shop_id)
-        pdf_path, bill_result = generate_pdf_bill(
+        pdf_data, bill_result = generate_pdf_bill(
             shop           = shop,
             customer       = customer,
             items          = items,
@@ -336,7 +326,7 @@ def generate_bill_from_message(
             customer_phone = "",
             items          = bill_result.items,
             bill_result    = bill_result,
-            pdf_path       = pdf_path,
+            pdf_data       = pdf_data,
             raw_message    = message,
             confidence     = parsed.get("confidence", 1.0),
         )
@@ -361,7 +351,6 @@ def generate_bill_from_message(
         "customer":       parsed["customer_name"],
         "items_count":    len(items),
         "grand_total":    bill_result.grand_total,
-        "pdf_path":       pdf_path,
         "confidence":     parsed.get("confidence", 1.0),
         "warnings":       parsed.get("warnings", []),
     }
@@ -545,7 +534,7 @@ def interactive_mode(shop_id: str = "RAVI"):
                     print(f"  Warning  : Low confidence — please verify items")
                 for w in result.get("warnings", []):
                     print(f"  Note     : {w}")
-                print(f"\n  Open bill: {result['pdf_path']}")
+                print(f"\n  Bill stored in database")
             else:
                 print(f"\n  Could not generate bill: {result['error']}")
                 print("  Please try rephrasing your message")

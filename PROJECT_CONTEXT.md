@@ -23,12 +23,12 @@ Two entry points:
 | File | Purpose |
 |---|---|
 | `main.py` | Entry point: CLI billing loop, CRUD ops (save/query bills), session management, environment validation. Seeds demo shop "RAVI". |
-| `database.py` | SQLAlchemy models + session helper. Models: `Shop`, `Bill` (with `is_return` flag), `SessionRecord`, `InvoiceSequence`, `Registration`, `ConversationLog`. Thread-safe invoice sequence. |
-| `bill_generator.py` | Dataclasses (`BillItem`, `ShopProfile`, `CustomerInfo`, `BillResult`), GST calculation, PDF generation via ReportLab. Handles TAX INVOICE, BILL OF SUPPLY, and CREDIT NOTE. |
+| `database.py` | SQLAlchemy models + session helper. Models: `Shop`, `Bill` (with `is_return` flag + `pdf_data` LargeBinary), `SessionRecord`, `InvoiceSequence`, `Registration`, `ConversationLog`, `ReportPDF`. Thread-safe invoice sequence. |
+| `bill_generator.py` | Dataclasses (`BillItem`, `ShopProfile`, `CustomerInfo`, `BillResult`), GST calculation, in-memory PDF generation via ReportLab (returns bytes, no filesystem). Handles TAX INVOICE, BILL OF SUPPLY, and CREDIT NOTE. |
 | `return_detector.py` | Rule-based + fuzzy return/credit note intent detection. Keyword regex, rapidfuzz partial matching, negative price detection. `negate_items()` for credit note processing. No external API calls. |
 | `claude_parser.py` | Sends shopkeeper messages to Claude API for item extraction. Includes rate limiting, retry logic (429/529), input sanitization, prompt injection detection, and a regex fallback parser. |
 | `gst_rates.py` | 200+ hardcoded HSN/GST rate mappings. 5-step lookup: exact → substring → fuzzy (rapidfuzz) → JSON cache → Claude API fallback. |
-| `reports.py` | GST report generation: `get_gst_report()` (DB aggregation), `parse_report_range()` (NL date parsing), `msg_gst_report()` (WhatsApp format), `export_gst_report_pdf()` (ReportLab PDF). Indian number formatting. |
+| `reports.py` | GST report generation: `get_gst_report()` (DB aggregation), `parse_report_range()` (NL date parsing), `msg_gst_report()` (WhatsApp format), `export_gst_report_pdf()` (returns PDF bytes + filename, no filesystem). Indian number formatting. |
 | `config.py` | Loads `.env`, validates required keys, lazy Anthropic client singleton. Meta WhatsApp (`WHATSAPP_*`, `VERIFY_TOKEN`). |
 | `whatsapp_client.py` | Meta Graph API: send text, template, document by URL; parse webhook payload. |
 | `whatsapp_webhook.py` | Flask app with Meta webhook (GET verify + POST). Full self-registration state machine (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ACTIVE → EXPIRED). Bill preview/confirmation flow before PDF generation. Indian states dict for IGST state selection. REST API endpoints with API key auth. |
@@ -99,12 +99,13 @@ Two entry points:
 - **Bill confirmation flow**: After parsing, a preview is shown (items with GST rate per item, customer, tax type, full GST breakdown). User must reply YES to generate. Can modify customer name (`NAME Ravi`), state (`STATE`), override GST rate (`GST 1 12`), re-enter items (`EDIT`), or cancel. Pending bills expire after 10 minutes. Stored in DB via `PendingBillRecord` table (keyed by phone, safe across gunicorn workers). GST rates resolved at preview time and stored in pending items — ensures preview totals match final bill exactly.
 - **GST rate source tracking**: `get_gst_rate_smart()` returns a `source` field: `exact`, `fuzzy`, `cache`, `claude`, `default`. Items with `fuzzy` or `default` source show a warning marker in preview. Users can override with `GST <item#> <rate>`.
 - **Orphan command handling**: If user sends confirmation commands (YES, CANCEL, EDIT, NAME, STATE, GST override) with no pending bill, a helpful "no pending bill" message is shown instead of parsing as items.
-- **GST Reports**: `gst report` command generates monthly/date-range GST summaries. Supports "gst report", "gst report last 7 days", "gst report last month", "gst report march". Returns WhatsApp text summary + PDF attachment. Indian number formatting (lakh/crore). Report PDFs saved in `reports/` folder.
+- **GST Reports**: `gst report` command generates monthly/date-range GST summaries. Supports "gst report", "gst report last 7 days", "gst report last month", "gst report march". Returns WhatsApp text summary + PDF attachment. Indian number formatting (lakh/crore). Report PDFs stored in `ReportPDF` table (in-memory generation, no filesystem).
 - **Regex fallback**: If Claude API fails, a rule-based regex parser handles item extraction (confidence capped at 0.6). Patterns are anchored to prevent greedy cross-item matching.
 - **Rate limiting**: 100 calls/60s sliding window on Claude API calls
 - **State defaults**: Telangana / state code 36 (Hyderabad-centric). Customer state defaults to shop state (intra-state) if not provided.
 - **GST rate substring matching**: Uses word-boundary regex (`\bterm\b`) instead of raw substring to prevent false positives (e.g., "ac" no longer matches "bracelet")
 - **Cache file**: Uses absolute path (`os.path.dirname(os.path.abspath(__file__))`) with thread-safe read-merge-write to handle concurrent gunicorn workers
+- **PDF storage**: All PDFs (bills and reports) are generated in-memory via BytesIO and stored as `LargeBinary` in PostgreSQL. No filesystem PDF operations. `Bill.pdf_data` for invoices, `ReportPDF` table for GST reports. Served via `/bills/<invoice>.pdf` and `/reports/<filename>` endpoints reading from DB.
 - **PDF safety**: All user-supplied text is XML-escaped before rendering in ReportLab Paragraphs
 - **API key logging**: Truncated to first 8 chars to prevent plaintext credential exposure
 

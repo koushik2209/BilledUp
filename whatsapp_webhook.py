@@ -45,6 +45,7 @@ from main import (
 )
 from database import (
     db_session, Registration, ConversationLog, Shop, PendingBillRecord,
+    Bill, ReportPDF,
     init_database as init_db,
     generate_api_key, validate_api_key,
 )
@@ -448,13 +449,11 @@ def send(to: str, body: str):
         log.error(f"Send failed to {to}: {e}")
 
 
-def send_pdf(to: str, pdf_path: str, caption: str = "", url_prefix: str = "bills"):
+def send_pdf(to: str, filename: str, caption: str = "", url_prefix: str = "bills"):
     """Send a PDF as a WhatsApp document (public HTTPS URL required).
 
     url_prefix: "bills" for invoices, "reports" for GST reports.
     """
-    filename = os.path.basename(pdf_path)
-
     if not BASE_URL:
         log.warning("BASE_URL not set — cannot send PDF media. Sending text fallback.")
         send(
@@ -865,8 +864,16 @@ def _handle_gst_report(from_number: str, msg_lower: str, shop_id: str, shop_name
 
         # Generate and send PDF if there are invoices
         if report.total_invoices > 0:
-            pdf_path = export_gst_report_pdf(report, label, shop_name)
-            send_pdf(from_number, pdf_path, f"📊 GST Report — {label}", url_prefix="reports")
+            pdf_bytes, report_filename = export_gst_report_pdf(report, label, shop_name)
+            with db_session() as session:
+                existing = session.query(ReportPDF).filter_by(filename=report_filename).first()
+                if existing:
+                    existing.pdf_data = pdf_bytes
+                else:
+                    session.add(ReportPDF(
+                        filename=report_filename, shop_id=shop_id, pdf_data=pdf_bytes,
+                    ))
+            send_pdf(from_number, report_filename, f"📊 GST Report — {label}", url_prefix="reports")
 
     except Exception as e:
         log.error(f"GST report error for {from_number}: {e}", exc_info=True)
@@ -1211,7 +1218,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
         ]
 
         invoice_number = generate_invoice_number(pending.shop_id, is_return=pending.is_return)
-        pdf_path, bill_result = generate_pdf_bill(
+        pdf_data, bill_result = generate_pdf_bill(
             shop           = shop,
             customer       = customer,
             items          = items,
@@ -1229,7 +1236,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
                 customer_phone = from_number,
                 items          = bill_result.items,
                 bill_result    = bill_result,
-                pdf_path       = pdf_path,
+                pdf_data       = pdf_data,
                 raw_message    = pending.raw_message,
                 confidence     = pending.confidence,
                 is_return      = pending.is_return,
@@ -1258,7 +1265,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
         sign = "-" if pending.is_return else ""
         send_pdf(
             to       = from_number,
-            pdf_path = pdf_path,
+            filename = f"{invoice_number}.pdf",
             caption  = f"📄 {doc_label} {invoice_number} — {sign}Rs.{abs(bill_result.grand_total):.2f}",
         )
 
@@ -1477,36 +1484,35 @@ def health():
 
 @app.route("/bills/<filename>", methods=["GET"])
 def serve_bill(filename):
-    """Serve PDF bills (validated filename)."""
+    """Serve PDF bills from database."""
     if not re.match(r'^[\w\-]+\.pdf$', filename):
         return {"error": "Invalid filename"}, 400
-    from flask import send_from_directory
-    from config import BILLS_FOLDER
-    try:
-        return send_from_directory(
-            os.path.abspath(BILLS_FOLDER),
-            filename,
+    invoice_number = filename[:-4]  # Strip .pdf
+    with db_session() as session:
+        bill = session.query(Bill).filter_by(invoice_number=invoice_number).first()
+        if not bill or not bill.pdf_data:
+            return {"error": "Bill not found"}, 404
+        return Response(
+            bill.pdf_data,
             mimetype="application/pdf",
+            headers={"Content-Disposition": f"inline; filename={filename}"},
         )
-    except Exception:
-        return {"error": "Bill not found"}, 404
 
 
 @app.route("/reports/<filename>", methods=["GET"])
 def serve_report(filename):
-    """Serve GST report PDFs (validated filename)."""
+    """Serve GST report PDFs from database."""
     if not re.match(r'^[\w\-]+\.pdf$', filename):
         return {"error": "Invalid filename"}, 400
-    from flask import send_from_directory
-    reports_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
-    try:
-        return send_from_directory(
-            os.path.abspath(reports_folder),
-            filename,
+    with db_session() as session:
+        report = session.query(ReportPDF).filter_by(filename=filename).first()
+        if not report:
+            return {"error": "Report not found"}, 404
+        return Response(
+            report.pdf_data,
             mimetype="application/pdf",
+            headers={"Content-Disposition": f"inline; filename={filename}"},
         )
-    except Exception:
-        return {"error": "Report not found"}, 404
 
 
 @app.route("/admin/registrations", methods=["GET"])
@@ -1613,7 +1619,7 @@ def api_generate_bill():
     # Generate
     try:
         invoice_number = generate_invoice_number(shop.shop_id)
-        pdf_path, bill_result = generate_pdf_bill(
+        pdf_data, bill_result = generate_pdf_bill(
             shop=shop, customer=customer, items=items,
             invoice_number=invoice_number, gst_client=get_anthropic_client(),
         )
@@ -1627,13 +1633,13 @@ def api_generate_bill():
             shop_id=shop.shop_id, invoice_number=invoice_number,
             customer_name=customer_name, customer_phone="",
             items=bill_result.items, bill_result=bill_result,
-            pdf_path=pdf_path, raw_message=str(data),
+            pdf_data=pdf_data, raw_message=str(data),
         )
     except Exception as e:
         log.error(f"DB save failed (non-fatal): {e}")
 
-    filename = os.path.basename(pdf_path)
-    pdf_url = f"{BASE_URL}/bills/{filename}" if BASE_URL else filename
+    pdf_filename = f"{invoice_number}.pdf"
+    pdf_url = f"{BASE_URL}/bills/{pdf_filename}" if BASE_URL else pdf_filename
 
     return {
         "success":        True,

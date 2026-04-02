@@ -14,7 +14,7 @@
 
 6. **Conversation state machine**: Registration is a multi-step flow (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ACTIVE → EXPIRED). State stored in `Registration.state` column.
 
-7. **GST Report system**: `reports.py` handles monthly and date-range GST summaries. WhatsApp command `gst report [range]` triggers DB aggregation → WhatsApp text + PDF. Supports: empty (current month), "last N days", "last month", "this month", month names. PDF generated via ReportLab, saved in `reports/` folder. Indian number formatting (lakh/crore system). `GSTReport` dataclass holds all fields.
+7. **GST Report system**: `reports.py` handles monthly and date-range GST summaries. WhatsApp command `gst report [range]` triggers DB aggregation → WhatsApp text + PDF. Supports: empty (current month), "last N days", "last month", "this month", month names. PDF generated via ReportLab into BytesIO, stored as `LargeBinary` in `ReportPDF` table. Indian number formatting (lakh/crore system). `GSTReport` dataclass holds all fields.
 
 8. **Bill preview/confirmation flow**: After parsing, bills are NOT generated immediately. A preview is shown with items, customer name, and tax type. User must reply YES to confirm. Can modify name (`NAME Ravi`), state (`STATE` → state selection sub-flow), re-enter items (`EDIT`), or `CANCEL`. Pending bills stored in DB (`PendingBillRecord` table, keyed by phone, 10-minute expiry) — safe across multiple gunicorn workers. Commands like `help`, `today`, `history` still work during confirmation mode. **Natural correction**: if user sends a new item-like message while a pending bill exists, it's auto-parsed and replaces the pending bill (no need to EDIT first). Credit note previews show a minimal command list (YES/EDIT/CANCEL only).
 
@@ -88,7 +88,7 @@
 1. **No authentication on admin endpoints**: `/admin/registrations` is publicly accessible
 2. **Demo shop hardcoded**: "Ravi Mobile Accessories" with GSTIN `36AABCU9603R1ZX` auto-seeded
 3. **No payment integration**: Trial expiry requires manual upgrade via WhatsApp support
-4. **PDF serving requires BASE_URL**: Meta document messages need a public HTTPS URL for the PDF; configure `BASE_URL` so `/bills/` and `/reports/` are reachable.
+4. **PDF storage is in-database**: All PDFs (bills and reports) are generated in-memory via BytesIO and stored as `LargeBinary` in PostgreSQL. `Bill.pdf_data` for invoices, `ReportPDF` table for GST reports. Served via `/bills/<invoice>.pdf` and `/reports/<filename>` endpoints reading from DB. Meta document messages still need `BASE_URL` configured so these endpoints are publicly reachable.
 5. **No multi-language output**: Bills are always in English. Only input supports Telugu/Hindi.
 6. **HSN codes are best-effort**: Disclaimer in README — verify with CA before filing.
 7. **Meta webhook verification**: GET `/webhook` uses `VERIFY_TOKEN` vs `hub.verify_token`. Optional: validate `X-Hub-Signature-256` on POST in production.

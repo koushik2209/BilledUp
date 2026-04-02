@@ -16,7 +16,7 @@ from contextlib import contextmanager
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Text,
-    Boolean, DateTime, Index, func,
+    Boolean, DateTime, Index, LargeBinary, func,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from config import DATABASE_URL
@@ -75,6 +75,7 @@ class Bill(Base):
     is_igst         = Column(Boolean, default=False)
     is_return       = Column(Boolean, default=False)
     pdf_path        = Column(Text, nullable=False)
+    pdf_data        = Column(LargeBinary, nullable=True)
     raw_message     = Column(Text, default="")
     confidence      = Column(Float, default=1.0)
     created_at      = Column(DateTime, default=datetime.utcnow, index=True)
@@ -133,6 +134,16 @@ class PendingBillRecord(Base):
     phone      = Column(String(30), primary_key=True)
     data_json  = Column(Text, nullable=False)
     expires_at = Column(DateTime, nullable=False, index=True)
+
+
+class ReportPDF(Base):
+    __tablename__ = "report_pdfs"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    filename   = Column(String(200), unique=True, nullable=False, index=True)
+    shop_id    = Column(String(50), nullable=False, index=True)
+    pdf_data   = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 # ════════════════════════════════════════════════

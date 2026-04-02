@@ -35,7 +35,6 @@ PORT              = int(os.getenv("PORT", 5000))
 
 # ── Bill settings ──
 BILL_PREFIX       = "INV"
-BILLS_FOLDER      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bills")
 
 # ── Validate on startup ──
 if not ANTHROPIC_API_KEY:
@@ -65,7 +64,6 @@ def get_config_summary():
         "debug": DEBUG,
         "port": PORT,
         "bill_prefix": BILL_PREFIX,
-        "bills_folder": BILLS_FOLDER,
         "api_key_loaded": bool(ANTHROPIC_API_KEY),
     }
 # ── Meta WhatsApp Cloud API ──
@@ -98,7 +96,6 @@ if __name__ == "__main__":
     print(f"  Database : {summary['database']}")
     print(f"  Debug    : {summary['debug']}")
     print(f"  Port     : {summary['port']}")
-    print(f"  Bills in : {summary['bills_folder']}/")
     print(f"  API Key  : {ANTHROPIC_API_KEY[:8]}...{'*' * 12}")
     print("=" * 45)
     print("  Config loaded successfully")

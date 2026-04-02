@@ -371,12 +371,11 @@ def generate_pdf_bill(
     items:          list,
     invoice_number: str,
     gst_client=None,
-    save_path:      str | None = None,
     is_return:      bool = False,
-) -> tuple[str, BillResult]:
+) -> tuple[bytes, BillResult]:
     """
-    Generate a GST bill PDF.
-    Returns (pdf_path, bill_result).
+    Generate a GST bill PDF in memory.
+    Returns (pdf_bytes, bill_result).
 
     Bill type:
     - is_return=True       → CREDIT NOTE
@@ -411,15 +410,12 @@ def generate_pdf_bill(
             in_words=bill.in_words,
         )
 
-    from config import BILLS_FOLDER, PLATFORM_NAME, PLATFORM_TAGLINE, PLATFORM_SUPPORT
-    os.makedirs(BILLS_FOLDER, exist_ok=True)
- 
-    if not save_path:
-        safe      = re.sub(r"[^\w\-]", "_", invoice_number)
-        save_path = os.path.join(BILLS_FOLDER, f"{safe}.pdf")
- 
+    from io import BytesIO
+    from config import PLATFORM_NAME, PLATFORM_TAGLINE, PLATFORM_SUPPORT
+
+    buffer = BytesIO()
     doc = SimpleDocTemplate(
-        save_path, pagesize=A4,
+        buffer, pagesize=A4,
         rightMargin=14*mm, leftMargin=14*mm,
         topMargin=12*mm, bottomMargin=12*mm,
         compress=1,
@@ -674,14 +670,14 @@ def generate_pdf_bill(
     except Exception as e:
         log.error(f"PDF build failed: {e}")
         raise RuntimeError(f"PDF generation failed: {e}")
- 
-    abs_path = os.path.abspath(save_path)
-    size_kb  = os.path.getsize(abs_path) / 1024
-    log.info(f"Bill saved: {abs_path} ({size_kb:.1f} KB)")
+
+    pdf_bytes = buffer.getvalue()
+    size_kb = len(pdf_bytes) / 1024
+    log.info(f"Bill generated: {invoice_number} ({size_kb:.1f} KB)")
     if size_kb > 500:
         log.warning(f"Bill is {size_kb:.0f}KB — may be slow on WhatsApp")
- 
-    return abs_path, bill
+
+    return pdf_bytes, bill
  
  
 # ════════════════════════════════════════════════
@@ -842,25 +838,25 @@ if __name__ == "__main__":
  
     # Generate TAX INVOICE — intra-state (CGST + SGST)
     inv1 = generate_invoice_number(shop_with_gstin.shop_id)
-    path1, bill1 = generate_pdf_bill(
+    pdf1, bill1 = generate_pdf_bill(
         shop=shop_with_gstin, customer=customer_intra,
         items=items, invoice_number=inv1, gst_client=client,
     )
-    print(f"TAX INVOICE (intra): {path1}  |  Rs.{bill1.grand_total:.2f}")
+    print(f"TAX INVOICE (intra): {inv1} ({len(pdf1)/1024:.1f} KB)  |  Rs.{bill1.grand_total:.2f}")
 
     # Generate TAX INVOICE — inter-state (IGST)
     inv3 = generate_invoice_number(shop_with_gstin.shop_id)
-    path3, bill3 = generate_pdf_bill(
+    pdf3, bill3 = generate_pdf_bill(
         shop=shop_with_gstin, customer=customer_inter,
         items=items, invoice_number=inv3, gst_client=client,
     )
-    print(f"TAX INVOICE (inter): {path3}  |  Rs.{bill3.grand_total:.2f}  IGST=Rs.{bill3.total_igst:.2f}")
+    print(f"TAX INVOICE (inter): {inv3} ({len(pdf3)/1024:.1f} KB)  |  Rs.{bill3.grand_total:.2f}  IGST=Rs.{bill3.total_igst:.2f}")
 
     # Generate BILL OF SUPPLY
     items2 = [BillItem("saree", qty=1, price=1500), BillItem("dress", qty=1, price=800)]
     inv2   = generate_invoice_number(shop_no_gstin.shop_id)
-    path2, bill2 = generate_pdf_bill(
+    pdf2, bill2 = generate_pdf_bill(
         shop=shop_no_gstin, customer=CustomerInfo("Hansika"),
         items=items2, invoice_number=inv2, gst_client=client,
     )
-    print(f"BILL OF SUPPLY: {path2}  |  Rs.{bill2.grand_total:.2f}")
+    print(f"BILL OF SUPPLY: {inv2} ({len(pdf2)/1024:.1f} KB)  |  Rs.{bill2.grand_total:.2f}")

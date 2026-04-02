@@ -236,18 +236,17 @@ def test_msg_gst_report_with_data():
 
 
 def test_export_gst_report_pdf():
-    """PDF file is created successfully."""
+    """PDF bytes are generated successfully."""
     report = GSTReport(
         shop_id="TEST", start_date=date(2026, 3, 1), end_date=date(2026, 3, 28),
         total_invoices=10, total_sales=50000, total_cgst=2500, total_sgst=2500,
         total_igst=1000, total_gst=6000,
     )
-    path = export_gst_report_pdf(report, "March 2026", "Test Shop")
-    import os
-    assert os.path.exists(path)
-    assert path.endswith(".pdf")
-    # Cleanup
-    os.unlink(path)
+    pdf_bytes, filename = export_gst_report_pdf(report, "March 2026", "Test Shop")
+    assert isinstance(pdf_bytes, bytes)
+    assert len(pdf_bytes) > 0
+    assert filename.endswith(".pdf")
+    assert "TEST" in filename
 
 
 # ── Production edge case tests ──
@@ -842,8 +841,10 @@ def test_return_gst_reversal_values():
     shop = ShopProfile("TEST", "Test Shop", "Hyderabad", "36AABCU9603R1ZX", "+91 9876543210")
     customer = CustomerInfo("Test")
     items = [BillItem("phone case", 1, 500, hsn="3926", gst_rate=18)]
-    pdf, br = generate_pdf_bill(shop, customer, items, "CN-TEST-001",
-                                 gst_client=None, is_return=True)
+    pdf_bytes, br = generate_pdf_bill(shop, customer, items, "CN-TEST-001",
+                                      gst_client=None, is_return=True)
+    assert isinstance(pdf_bytes, bytes)
+    assert len(pdf_bytes) > 0
     assert br.subtotal < 0
     assert br.total_gst < 0
     assert br.grand_total < 0
@@ -852,7 +853,6 @@ def test_return_gst_reversal_values():
     assert abs(br.subtotal) == 500.0
     assert abs(br.total_gst) == 90.0  # 18% of 500
     assert abs(br.grand_total) == 590.0
-    os.unlink(pdf)
 
 
 def test_report_totals_with_returns():

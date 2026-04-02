@@ -15,6 +15,10 @@ Features:
 
 import os
 import re
+import hmac
+import hashlib
+import random
+import string
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -24,6 +28,7 @@ from config import (
     PLATFORM_NAME,
     BASE_URL,
     VERIFY_TOKEN,
+    WHATSAPP_APP_SECRET,
     get_anthropic_client,
 )
 from whatsapp_client import (
@@ -1263,9 +1268,10 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
 
         doc_label = "Credit Note" if pending.is_return else ("Bill of Supply" if pending.is_bill_of_supply else "Invoice")
         sign = "-" if pending.is_return else ""
+        suffix = ''.join(random.choices(string.ascii_lowercase, k=3))
         send_pdf(
             to       = from_number,
-            filename = f"{invoice_number}.pdf",
+            filename = f"{invoice_number}-{suffix}.pdf",
             caption  = f"📄 {doc_label} {invoice_number} — {sign}Rs.{abs(bill_result.grand_total):.2f}",
         )
 
@@ -1439,8 +1445,28 @@ def verify_meta_webhook():
     return "Forbidden", 403
 
 
+def _verify_webhook_signature() -> bool:
+    """Verify Meta X-Hub-Signature-256 header. Returns True if valid or skipped."""
+    if not WHATSAPP_APP_SECRET:
+        return True  # skip verification if secret not configured
+    signature_header = request.headers.get("X-Hub-Signature-256")
+    if not signature_header:
+        log.warning("Webhook POST missing X-Hub-Signature-256 header")
+        return False
+    expected = "sha256=" + hmac.new(
+        WHATSAPP_APP_SECRET.encode(), request.get_data(), hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature_header):
+        log.warning("Webhook signature mismatch")
+        return False
+    return True
+
+
 def handle_meta_webhook_post():
     """POST /webhook — incoming messages."""
+    if not _verify_webhook_signature():
+        return "Forbidden", 403
+
     body = request.get_json(silent=True)
     if body is None:
         return "", 200
@@ -1487,7 +1513,10 @@ def serve_bill(filename):
     """Serve PDF bills from database."""
     if not re.match(r'^[\w\-]+\.pdf$', filename):
         return {"error": "Invalid filename"}, 400
-    invoice_number = filename[:-4]  # Strip .pdf
+    # Strip .pdf, then strip optional 3-char random suffix (e.g., INV-2026-SHOP-00001-abc.pdf)
+    base = filename[:-4]
+    m = re.match(r'^(.+)-[a-z]{3}$', base)
+    invoice_number = m.group(1) if m else base
     with db_session() as session:
         bill = session.query(Bill).filter_by(invoice_number=invoice_number).first()
         if not bill or not bill.pdf_data:
@@ -1638,7 +1667,8 @@ def api_generate_bill():
     except Exception as e:
         log.error(f"DB save failed (non-fatal): {e}")
 
-    pdf_filename = f"{invoice_number}.pdf"
+    suffix = ''.join(random.choices(string.ascii_lowercase, k=3))
+    pdf_filename = f"{invoice_number}-{suffix}.pdf"
     pdf_url = f"{BASE_URL}/bills/{pdf_filename}" if BASE_URL else pdf_filename
 
     return {
@@ -1682,6 +1712,9 @@ def api_today_summary():
 # Always init tables (works with both gunicorn and python direct)
 init_database()
 init_registration_tables()
+
+if not WHATSAPP_APP_SECRET:
+    log.warning("WHATSAPP_APP_SECRET not set — webhook signature verification disabled")
 
 if __name__ == "__main__":
     # ── PRODUCTION AUTO-SWITCH ──

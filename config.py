@@ -70,6 +70,7 @@ def get_config_summary():
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 WHATSAPP_ACCESS_TOKEN    = os.getenv("WHATSAPP_ACCESS_TOKEN")
 VERIFY_TOKEN             = os.getenv("VERIFY_TOKEN")
+WHATSAPP_APP_SECRET      = os.getenv("WHATSAPP_APP_SECRET")
 
 # ── Public base URL ──
 BASE_URL = os.getenv("BASE_URL", "https://web-production-91c36.up.railway.app")

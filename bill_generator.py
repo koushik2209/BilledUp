@@ -400,8 +400,8 @@ def generate_pdf_bill(
         bill = BillResult(
             items=[BillItem(
                 name=i.name, qty=i.qty, price=-i.price, hsn=i.hsn,
-                gst_rate=i.gst_rate, cgst=-i.cgst, sgst=-i.sgst,
-                igst=-i.igst, total=-i.total,
+                gst_rate=i.gst_rate, amount=-i.amount, cgst=-i.cgst,
+                sgst=-i.sgst, igst=-i.igst, total=-i.total,
             ) for i in bill.items],
             subtotal=-bill.subtotal,
             total_cgst=-bill.total_cgst, total_sgst=-bill.total_sgst,

@@ -14,12 +14,13 @@ log = logging.getLogger("billedup.returns")
 # IMPORTANT: Only full phrases here — never bare words like "back" or "exchange"
 # which cause false positives ("back cover", "exchange offer").
 _RETURN_PHRASES = [
-    "return", "returned", "refund", "credit note",
+    "return", "returned", "returning", "refund", "credit note",
     "cancel order", "cancelled order",
     "give back", "take back", "sent back", "send back",
     "came back", "got back",                     # "customer came back to return"
     "exchange and return", "exchange this",
     "want to exchange", "wants to exchange",
+    "want to return", "wants to return", "wanted to return",
 ]
 
 # Pre-compiled regex for fast phrase matching (word-boundary on both ends)
@@ -43,7 +44,8 @@ _FALSE_POSITIVE_PATTERN = re.compile(
 # ── Strong return verbs that override the whitelist ──
 # If BOTH a product phrase AND a strong verb are present, it IS a return.
 _STRONG_RETURN_VERBS = [
-    "want to return", "returned", "refund", "credit note",
+    "want to return", "wants to return", "wanted to return",
+    "returned", "returning", "refund", "credit note",
     "give back", "send back", "sent back", "take back",
     "cancel order", "cancelled order",
 ]

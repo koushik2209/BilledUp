@@ -441,17 +441,19 @@ def is_valid_gstin(gstin: str) -> bool:
 # SEND HELPERS
 # ════════════════════════════════════════════════
 
-def send(to: str, body: str):
-    """Send WhatsApp message via Meta Cloud API."""
+def send(to: str, body: str) -> bool:
+    """Send WhatsApp message via Meta Cloud API. Returns True on success."""
     try:
         result = send_text_message(to, body)
         if result.get("error"):
             log.error(f"Send failed to {to}: {result.get('error')}")
-            return
+            return False
         log_message(to, "OUT", body)
         log.info(f"Sent to {to} ({len(body)} chars)")
+        return True
     except Exception as e:
         log.error(f"Send failed to {to}: {e}")
+        return False
 
 
 def send_pdf(to: str, filename: str, caption: str = "", url_prefix: str = "bills"):
@@ -786,6 +788,8 @@ def msg_preview(pending: PendingBill) -> str:
             lines.append(f"Total GST: {sign}Rs.{abs(totals['total_gst']):.2f}")
             lines.append(f"━━━━━━━━━━━━━━━━━")
             lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'}: {sign}Rs.{abs(totals['grand_total']):.2f}*")
+    else:
+        lines.append(f"\n⚠️ _Totals could not be calculated. Final bill will have correct totals._")
 
     # ── Confidence warning ──
     if pending.confidence < 0.8:
@@ -1102,9 +1106,16 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
         return
 
     # ── Natural correction: if message looks like items, re-parse and replace ──
+    # Guard: only accept if message has digits (prices) AND parser is confident.
+    # This prevents casual text ("ok nice", "thanks") from replacing the bill.
+    _has_digits = bool(re.search(r"\d", message))
+    if not _has_digits:
+        send(from_number, f"❓ Unknown command. See options below:\n\n{msg_preview(pending)}")
+        return
+
     try:
         parsed = parse_message(message)
-        if parsed.get("items") and not parsed.get("error"):
+        if parsed.get("items") and not parsed.get("error") and parsed.get("confidence", 0) >= 0.5:
             # Looks like new items — treat as automatic EDIT
             shop = get_shop(pending.shop_id)
             shop_state      = shop.state if shop else pending.shop_state
@@ -1189,10 +1200,38 @@ def _handle_state_selection(from_number: str, message: str,
     send(from_number, f"✅ State set to *{state_name}* (Code: {state_code})\n\n{msg_preview(pending)}")
 
 
+def _check_recent_duplicate(shop_id: str, customer_name: str, raw_message: str) -> str | None:
+    """Check if a bill with the same content was created in the last 60 seconds.
+    Returns the invoice_number if duplicate found, None otherwise."""
+    cutoff = datetime.utcnow() - timedelta(seconds=60)
+    with db_session() as session:
+        recent = session.query(Bill).filter(
+            Bill.shop_id == shop_id,
+            Bill.customer_name == customer_name,
+            Bill.raw_message == raw_message,
+            Bill.created_at >= cutoff,
+        ).first()
+        if recent:
+            return recent.invoice_number
+    return None
+
+
 def _generate_confirmed_bill(from_number: str, pending: PendingBill,
                              reg: dict, d_left: int):
     """Generate final bill + PDF from confirmed pending data."""
     try:
+        # Duplicate protection: same shop + customer + message within 60s
+        dup_invoice = _check_recent_duplicate(
+            pending.shop_id, pending.customer_name, pending.raw_message,
+        )
+        if dup_invoice:
+            log.warning(f"Duplicate bill blocked: {dup_invoice} for {from_number}")
+            send(from_number,
+                f"⚠️ This bill was already generated: *{dup_invoice}*\n\n"
+                f"Send a new message to create a different bill."
+            )
+            return
+
         send(from_number, "⏳ Generating your bill... 10 seconds.")
 
         # Load shop profile
@@ -1232,28 +1271,42 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             is_return      = pending.is_return,
         )
 
-        # Save to database
-        try:
-            save_bill(
-                shop_id        = pending.shop_id,
-                invoice_number = invoice_number,
-                customer_name  = pending.customer_name,
-                customer_phone = from_number,
-                items          = bill_result.items,
-                bill_result    = bill_result,
-                pdf_data       = pdf_data,
-                raw_message    = pending.raw_message,
-                confidence     = pending.confidence,
-                is_return      = pending.is_return,
+        # Save to database (retry once, warn user on failure)
+        db_saved = False
+        for _attempt in range(2):
+            try:
+                save_bill(
+                    shop_id        = pending.shop_id,
+                    invoice_number = invoice_number,
+                    customer_name  = pending.customer_name,
+                    customer_phone = from_number,
+                    items          = bill_result.items,
+                    bill_result    = bill_result,
+                    pdf_data       = pdf_data,
+                    raw_message    = pending.raw_message,
+                    confidence     = pending.confidence,
+                    is_return      = pending.is_return,
+                )
+                db_saved = True
+                break
+            except Exception as e:
+                log.error(f"DB save attempt {_attempt + 1} failed: {e}")
+
+        if not db_saved:
+            log.critical(f"BILL LOST — {invoice_number} not saved to DB")
+            send(from_number,
+                f"⚠️ Bill {invoice_number} was generated but could not be saved to our records. "
+                f"Please keep this invoice number and contact support: +91 7981053846"
             )
-        except Exception as e:
-            log.error(f"DB save failed (non-fatal): {e}")
 
         # Update bill count
-        upsert_registration(
-            from_number,
-            bills_count=reg.get("bills_count", 0) + 1,
-        )
+        try:
+            upsert_registration(
+                from_number,
+                bills_count=reg.get("bills_count", 0) + 1,
+            )
+        except Exception as e:
+            log.error(f"Bill count update failed (non-fatal): {e}")
 
         # Send bill summary + PDF
         summary = msg_bill_summary(
@@ -1307,8 +1360,8 @@ def handle_message(from_number: str, message: str):
 
     # ── STATE: NEW — never seen this number ──
     if not reg:
-        upsert_registration(from_number, state="ASKED_NAME")
-        send(from_number, msg_welcome())
+        if send(from_number, msg_welcome()):
+            upsert_registration(from_number, state="ASKED_NAME")
         return
 
     state = reg.get("state", "NEW")
@@ -1322,8 +1375,8 @@ def handle_message(from_number: str, message: str):
             )
             return
         shop_name = message.strip().title()
-        upsert_registration(from_number, shop_name=shop_name, state="ASKED_ADDRESS")
-        send(from_number, msg_ask_address(shop_name))
+        if send(from_number, msg_ask_address(shop_name)):
+            upsert_registration(from_number, shop_name=shop_name, state="ASKED_ADDRESS")
         return
 
     # ── STATE: ASKED_ADDRESS — waiting for address ──
@@ -1335,8 +1388,8 @@ def handle_message(from_number: str, message: str):
             )
             return
         address = message.strip()
-        upsert_registration(from_number, address=address, state="ASKED_GSTIN")
-        send(from_number, msg_ask_gstin())
+        if send(from_number, msg_ask_gstin()):
+            upsert_registration(from_number, address=address, state="ASKED_GSTIN")
         return
 
     # ── STATE: ASKED_GSTIN — waiting for GSTIN or skip ──

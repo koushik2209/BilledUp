@@ -461,39 +461,29 @@ def parse_message(message: str) -> dict:
         except anthropic.RateLimitError as e:
             last_error = f"Claude rate limit: {e}"
             log.warning(f"Attempt {attempt+1}: {last_error}")
-            if attempt == MAX_RETRIES - 1:
-                return _error_result(last_error, warnings=warnings,
-                                     parse_time_ms=_elapsed_ms(start_time))
- 
+
         except anthropic.APITimeoutError as e:
             last_error = f"Claude timeout: {e}"
             log.warning(f"Attempt {attempt+1}: {last_error}")
-            if attempt == MAX_RETRIES - 1:
-                return _error_result(last_error, warnings=warnings,
-                                     parse_time_ms=_elapsed_ms(start_time))
- 
+
         except anthropic.APIConnectionError as e:
             last_error = f"Connection error: {e}"
             log.warning(f"Attempt {attempt+1}: {last_error}")
-            if attempt == MAX_RETRIES - 1:
-                return _error_result(last_error, warnings=warnings,
-                                     parse_time_ms=_elapsed_ms(start_time))
- 
+
         except anthropic.APIStatusError as e:
             last_error = f"API error {e.status_code}: {e.message}"
             log.error(f"Attempt {attempt+1}: {last_error}")
-            # Retry on 529 (overloaded). 429 is caught by RateLimitError above.
+            # Non-retryable status codes return immediately (no fallback).
+            # Only 529 (overloaded) is retryable. 429 is caught by RateLimitError.
             if e.status_code != 529:
                 return _error_result(last_error, warnings=warnings,
                                      parse_time_ms=_elapsed_ms(start_time))
-            if attempt == MAX_RETRIES - 1:
-                return _error_result(last_error, warnings=warnings,
-                                     parse_time_ms=_elapsed_ms(start_time))
- 
+
         except Exception as e:
             last_error = f"Unexpected error: {e}"
             log.error(f"Attempt {attempt+1}: {last_error}")
-            if attempt == MAX_RETRIES - 1:
+            # Non-API errors (import errors, etc.) — don't retry
+            if not isinstance(e, (OSError, ConnectionError)):
                 return _error_result(last_error, warnings=warnings,
                                      parse_time_ms=_elapsed_ms(start_time))
  

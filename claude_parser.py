@@ -32,7 +32,14 @@ MAX_RETRIES         = 4                  # increased from 3
 RETRY_DELAYS        = [2, 5, 10, 20]    # longer delays for overload recovery
 RATE_LIMIT_CALLS    = 100               # increased from 50 for 500 customers
 RATE_LIMIT_WINDOW   = 60
- 
+
+# Regex pattern to detect weight/volume unit descriptors
+# These get glued to the item name, not treated as quantity
+_UNIT_PATTERN = re.compile(
+    r'\b\d+(?:\.\d+)?\s*(?:gm|gms|g|kg|kgs|ml|l|ltr|ltrs|litre|litres|gram|grams)\b',
+    re.IGNORECASE
+)
+
 # ── Rate limiter ──
 class RateLimiter:
     """Thread-safe sliding window rate limiter."""
@@ -76,6 +83,13 @@ Extract:
 Rules:
 - Always translate item names to simple English
 - If quantity not mentioned, assume 1
+- Weight/unit descriptors must be kept as part of the item name, NOT treated as quantity. qty must remain 1 for these. Units to recognise: gm, g, kg, kgs, ml, l, ltr, litre, litres, gram, grams. Examples:
+  "gold 500gm 100000"  → name="gold 500gm",  qty=1, price=100000
+  "oil 1kg 120"        → name="oil 1kg",      qty=1, price=120
+  "milk 500ml 25"      → name="milk 500ml",   qty=1, price=25
+  "rice 2kg 80"        → name="rice 2kg",     qty=1, price=80
+  "silver 10gm 6000"   → name="silver 10gm",  qty=1, price=6000
+- Normal quantity words (x2, 2x, "2 shirts") are still treated as qty. Only numeric+unit combos are glued to the item name.
 - Prices given are BEFORE GST — never add GST yourself
 - Ignore greetings, please, thank you etc.
 - If a price seems like a phone number (10 digits), ignore it
@@ -157,6 +171,16 @@ def validate_parsed_response(result: dict) -> tuple[dict, list]:
             qty = 1.0
             issues.append(f"Item '{name}' qty invalid — defaulting to 1")
         qty = max(0.001, min(float(MAX_QTY), qty))
+        # Safety net: if qty looks like a weight amount for weight-sold items
+        # and Claude misread the instruction, fix it here.
+        _weight_items = {"gold", "silver", "platinum", "oil", "milk", "rice",
+                         "wheat", "sugar", "dal", "ghee", "butter", "flour"}
+        item_base = name.lower().split()[0] if name else ""
+        if item_base in _weight_items and qty > 1 and qty >= 100:
+            # Nobody buys 100+ units of gold/oil/milk — this is a weight descriptor
+            unit_guess = f"{int(qty)}gm"
+            name = f"{name} {unit_guess}"
+            qty = 1.0
         try:
             price = float(item.get("price", 0))
         except (TypeError, ValueError):
@@ -183,6 +207,44 @@ def validate_parsed_response(result: dict) -> tuple[dict, list]:
     return result, issues
  
  
+# ── Unit-quantity post-processing ──
+def _fix_unit_quantities(items: list, original_text: str) -> list:
+    """
+    Post-process parsed items to detect cases where a weight/unit
+    descriptor was split across name and qty.
+
+    If an item has qty != 1 and the original text contains
+    "{qty}{unit}" adjacent to the item name, it means the unit
+    was a descriptor not a count — fix it.
+
+    Example: name="gold", qty=500, price=100000
+    Check if "500gm" or "500g" etc appears in original text near "gold"
+    → fix to name="gold 500gm", qty=1, price=100000
+    """
+    fixed = []
+    for item in items:
+        name  = item["name"]
+        qty   = item["qty"]
+        price = item["price"]
+
+        if qty != 1:
+            # Search original text for "{qty}{unit}" near this item
+            qty_str = str(int(qty)) if qty == int(qty) else str(qty)
+            unit_re = re.compile(
+                rf'\b{re.escape(qty_str)}'
+                rf'\s*(?:gm|gms|g|kg|kgs|ml|l|ltr|ltrs|litre|litres|gram|grams)\b',
+                re.IGNORECASE
+            )
+            match = unit_re.search(original_text)
+            if match:
+                # This qty was actually a unit — glue to name
+                unit_str = match.group(0).strip()
+                item = {**item, "name": f"{name} {unit_str}", "qty": 1.0}
+
+        fixed.append(item)
+    return fixed
+
+
 # ── Fallback rule-based parser ──
 def _regex_parse_message(message: str) -> dict:
     """
@@ -228,6 +290,17 @@ def _regex_parse_message(message: str) -> dict:
     # Groups: (name, qty_or_None, price)  — order varies per pattern
 
     patterns = [
+        # "item <num><unit> price" — e.g. "gold 500gm 100000", "oil 1kg 120"
+        # Weight/volume unit stays glued to item name, qty=1
+        (
+            re.compile(
+                r"([A-Za-z][A-Za-z\s]{0,30}?)\s+"
+                r"(\d+(?:\.\d+)?\s*(?:gm|gms|g|kg|kgs|ml|l|ltr|ltrs|litre|litres|gram|grams))\s+"
+                r"(\d+(?:\.\d+)?)",
+                re.IGNORECASE,
+            ),
+            "name_unit_price",
+        ),
         # "item price x<qty>"  — e.g. "pen 10 x 5", "pen 10 x5", "pen 10 × 5"
         (
             re.compile(
@@ -260,6 +333,15 @@ def _regex_parse_message(message: str) -> dict:
                 re.IGNORECASE,
             ),
             "qty_name_price",
+        ),
+        # "item <small-qty> price" — e.g. "charger 2 499", "pen 3 50"
+        # qty is a single digit 2-9, price is at least 2 digits (avoids Rs.1-9)
+        (
+            re.compile(
+                r"([A-Za-z][A-Za-z\s]{0,30}?)\s+([2-9])\s+(\d{2,}(?:\.\d+)?)",
+                re.IGNORECASE,
+            ),
+            "name_smallqty_price",
         ),
         # "item-price"  — e.g. "shirt-500"
         (
@@ -322,7 +404,13 @@ def _regex_parse_message(message: str) -> dict:
                 continue
 
             try:
-                if ptype == "name_price_xqty":
+                if ptype == "name_unit_price":
+                    base_name = _clean_name(m.group(1))
+                    unit_str  = m.group(2).strip()
+                    name  = f"{base_name} {unit_str.lower()}"
+                    qty   = 1.0
+                    price = float(m.group(3))
+                elif ptype == "name_price_xqty":
                     name  = _clean_name(m.group(1))
                     price = float(m.group(2))
                     qty   = float(m.group(3))
@@ -337,6 +425,10 @@ def _regex_parse_message(message: str) -> dict:
                 elif ptype == "qty_name_price":
                     qty   = float(m.group(1))
                     name  = _clean_name(m.group(2))
+                    price = float(m.group(3))
+                elif ptype == "name_smallqty_price":
+                    name  = _clean_name(m.group(1))
+                    qty   = float(m.group(2))
                     price = float(m.group(3))
                 elif ptype == "name_dash_price":
                     name  = _clean_name(m.group(1))
@@ -380,6 +472,9 @@ def _regex_parse_message(message: str) -> dict:
         if key not in seen:
             seen.add(key)
             unique_items.append(it)
+
+    # Fix unit quantities: "gold 500gm 100000" should not treat 500 as qty
+    unique_items = _fix_unit_quantities(unique_items, message)
 
     notes_parts.insert(0, "Parsed by regex fallback (Claude API unavailable)")
 

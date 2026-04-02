@@ -441,6 +441,17 @@ def get_gst_rate_smart(item_name, client=None, shop_id=None):
     """
     item_lower = item_name.lower().strip()
 
+    # Strip unit descriptors for GST lookup purposes
+    # "gold 500gm" → lookup as "gold", but keep original name for display
+    item_for_lookup = re.sub(
+        r'\s*\d+(?:\.\d+)?\s*(?:gm|gms|g|kg|kgs|ml|l|ltr|ltrs|litre|litres|gram|grams)\b',
+        '',
+        item_lower,
+        flags=re.IGNORECASE
+    ).strip()
+    # Use stripped version for all lookup steps, fall back to original if empty
+    item_lower = item_for_lookup if item_for_lookup else item_lower
+
     # Step 0 — shop item master (only confirmed items)
     if shop_id:
         from database import get_item_master

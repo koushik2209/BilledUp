@@ -124,6 +124,8 @@
 
 6. **Thread safety**: Invoice sequence uses both a Python `threading.Lock` and SQL `WITH FOR UPDATE`. The Python lock is needed because SQLite doesn't support row-level locking. GST cache also uses a threading lock for concurrent worker safety.
 
+6b. **Webhook message dedup**: INSERT-FIRST pattern via `try_claim_message(message_id)` — attempts INSERT into `ProcessedMessage` table, returns True (new, process it) or False (duplicate via UNIQUE constraint, skip). Eliminates check-then-insert race condition. Empty/missing `message_id` logs warning and skips dedup (message still processed). Cleanup via `maybe_cleanup_processed_messages()` — throttled to every 100 webhook calls using a thread-safe counter, not every request. `try_claim_message` uses raw `SessionLocal()` (not `db_session()`) to keep expected IntegrityError at DEBUG level instead of ERROR. Fails open on non-integrity DB errors. `parse_meta_webhook_payload()` returns `message_id` field (from `messages[].id`).
+
 7. **Meta WhatsApp sends**: `send_text_message` / `send_document_by_link` need `WHATSAPP_PHONE_NUMBER_ID` and `WHATSAPP_ACCESS_TOKEN`; missing values surface as API errors when sending.
 
 8. **`number_to_words` uses Indian numbering**: Lakh (100,000) and Crore (10,000,000) system, not million/billion. Negative amounts return empty string (guarded).

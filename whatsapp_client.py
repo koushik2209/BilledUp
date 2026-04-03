@@ -205,6 +205,7 @@ def parse_meta_webhook_payload(body: dict[str, Any]) -> list[dict[str, str]]:
                         {
                             "from": normalize_whatsapp_sender(from_raw),
                             "text": body_text,
+                            "message_id": msg.get("id", ""),
                         }
                     )
     except Exception as e:

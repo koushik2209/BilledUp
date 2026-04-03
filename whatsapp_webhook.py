@@ -53,6 +53,7 @@ from database import (
     Bill, ReportPDF,
     init_database as init_db,
     generate_api_key, validate_api_key,
+    try_claim_message, maybe_cleanup_processed_messages,
 )
 from reports import (
     get_gst_report, parse_report_range, msg_gst_report,
@@ -1724,11 +1725,23 @@ def handle_meta_webhook_post():
     if body is None:
         return "", 200
 
+    # Throttled cleanup — runs once every ~100 webhook calls, not every request
+    maybe_cleanup_processed_messages()
+
     messages = parse_meta_webhook_payload(body)
     for msg in messages:
         from_number = msg["from"]
         incoming_msg = msg["text"]
-        log.info(f"Incoming: {from_number} — '{incoming_msg[:80]}'")
+        message_id = msg.get("message_id", "")
+
+        # ── Dedup: INSERT-FIRST pattern ──
+        if not message_id:
+            log.warning(f"[DEDUP] Missing message_id from {from_number} — skipping dedup")
+        elif not try_claim_message(message_id):
+            log.info(f"[DEDUP] Duplicate ignored: message_id={message_id} from={from_number}")
+            continue
+
+        log.info(f"[DEDUP] New message: message_id={message_id[:20] if message_id else '(none)'} from={from_number}")
 
         try:
             handle_message(from_number, incoming_msg)

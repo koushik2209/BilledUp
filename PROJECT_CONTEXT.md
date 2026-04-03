@@ -75,6 +75,7 @@ Two entry points:
 | `SessionRecord` | CLI session with bill count and total value |
 | `InvoiceSequence` | Thread-safe per-shop-per-year invoice counter |
 | `ConversationLog` | All WhatsApp messages (IN/OUT) for debugging |
+| `ProcessedMessage` | WhatsApp message ID dedup table — prevents duplicate processing on webhook retries |
 
 ---
 
@@ -108,6 +109,7 @@ Two entry points:
 - **PDF storage**: All PDFs (bills and reports) are generated in-memory via BytesIO and stored as `LargeBinary` in PostgreSQL. No filesystem PDF operations. `Bill.pdf_data` for invoices, `ReportPDF` table for GST reports. Served via `/bills/<invoice>.pdf` and `/reports/<filename>` endpoints reading from DB.
 - **PDF safety**: All user-supplied text is XML-escaped before rendering in ReportLab Paragraphs
 - **API key logging**: Truncated to first 8 chars to prevent plaintext credential exposure
+- **Webhook dedup**: INSERT-FIRST pattern via `try_claim_message(message_id)` — attempts INSERT, returns True (new) or False (duplicate via UNIQUE constraint). No check-then-insert race condition. Empty/missing message_id skips dedup with a warning log. Cleanup throttled to every 100 webhook calls (not every request). Uses raw session to keep expected IntegrityError at DEBUG level. Fails open on non-integrity DB errors.
 
 ---
 

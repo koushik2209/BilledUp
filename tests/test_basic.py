@@ -1497,3 +1497,161 @@ def test_ambiguity_shown_in_preview():
     )
     preview = msg_preview(pending)
     assert "verify quantity and price" in preview.lower()
+
+
+# ════════════════════════════════════════════════
+# MESSAGE DEDUP — webhook retry protection
+# ════════════════════════════════════════════════
+
+def test_dedup_claim_new_message():
+    """First claim for a message_id returns True (new message)."""
+    from database import try_claim_message, init_database
+    init_database()
+    assert try_claim_message("wamid_claim_new_001") is True
+
+
+def test_dedup_claim_duplicate_returns_false():
+    """Second claim for same message_id returns False (duplicate)."""
+    from database import try_claim_message, init_database
+    init_database()
+    msg_id = "wamid_claim_dup_002"
+    assert try_claim_message(msg_id) is True
+    assert try_claim_message(msg_id) is False
+
+
+def test_dedup_different_ids_independent():
+    """Different message IDs don't interfere with each other."""
+    from database import try_claim_message, init_database
+    init_database()
+    assert try_claim_message("wamid_indep_aaa") is True
+    assert try_claim_message("wamid_indep_bbb") is True
+    # Re-claim both → both duplicates
+    assert try_claim_message("wamid_indep_aaa") is False
+    assert try_claim_message("wamid_indep_bbb") is False
+
+
+def test_dedup_triple_claim_no_crash():
+    """Claiming the same ID 3 times must not raise — returns False on 2nd+."""
+    from database import try_claim_message, init_database
+    init_database()
+    msg_id = "wamid_triple_003"
+    assert try_claim_message(msg_id) is True
+    assert try_claim_message(msg_id) is False
+    assert try_claim_message(msg_id) is False
+
+
+def test_dedup_cleanup_removes_old():
+    """maybe_cleanup_processed_messages removes stale records when counter hits threshold."""
+    from database import (
+        db_session, ProcessedMessage, try_claim_message, init_database,
+        _DEDUP_CLEANUP_INTERVAL, _dedup_counter_lock,
+    )
+    import database as db_mod
+    from datetime import datetime, timedelta
+    init_database()
+
+    # Insert an old record directly (72h ago)
+    old_id = "wamid_old_cleanup_v2"
+    with db_session() as session:
+        session.add(ProcessedMessage(
+            message_id=old_id,
+            created_at=datetime.utcnow() - timedelta(hours=72),
+        ))
+
+    # Verify it exists
+    assert try_claim_message(old_id) is False  # can't claim → it exists
+
+    # Force counter to threshold so next call triggers cleanup
+    with _dedup_counter_lock:
+        db_mod._dedup_call_counter = _DEDUP_CLEANUP_INTERVAL - 1
+
+    db_mod.maybe_cleanup_processed_messages()
+
+    # Old record should be gone — claim succeeds again
+    assert try_claim_message(old_id) is True
+
+
+def test_dedup_recent_survives_cleanup():
+    """Recent records survive cleanup."""
+    from database import (
+        try_claim_message, init_database,
+        _DEDUP_CLEANUP_INTERVAL, _dedup_counter_lock,
+    )
+    import database as db_mod
+    init_database()
+
+    recent_id = "wamid_recent_survive_v2"
+    assert try_claim_message(recent_id) is True
+
+    # Force cleanup
+    with _dedup_counter_lock:
+        db_mod._dedup_call_counter = _DEDUP_CLEANUP_INTERVAL - 1
+    db_mod.maybe_cleanup_processed_messages()
+
+    # Recent record still blocks re-claim
+    assert try_claim_message(recent_id) is False
+
+
+def test_dedup_cleanup_throttled():
+    """Cleanup does NOT run on every call — only at threshold."""
+    from database import _DEDUP_CLEANUP_INTERVAL, _dedup_counter_lock
+    import database as db_mod
+
+    # Reset counter
+    with _dedup_counter_lock:
+        db_mod._dedup_call_counter = 0
+
+    # Call N-1 times — should not reset counter to 0
+    for _ in range(_DEDUP_CLEANUP_INTERVAL - 1):
+        db_mod.maybe_cleanup_processed_messages()
+
+    with _dedup_counter_lock:
+        assert db_mod._dedup_call_counter == _DEDUP_CLEANUP_INTERVAL - 1
+
+    # One more call triggers cleanup and resets counter
+    db_mod.maybe_cleanup_processed_messages()
+    with _dedup_counter_lock:
+        assert db_mod._dedup_call_counter == 0
+
+
+def test_webhook_payload_includes_message_id():
+    """parse_meta_webhook_payload extracts message ID."""
+    from whatsapp_client import parse_meta_webhook_payload
+    body = {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "id": "wamid.HBgNOTE5ODc2NTQzMjEw",
+                        "from": "919876543210",
+                        "type": "text",
+                        "text": {"body": "shirt 500"},
+                    }]
+                }
+            }]
+        }]
+    }
+    msgs = parse_meta_webhook_payload(body)
+    assert len(msgs) == 1
+    assert msgs[0]["message_id"] == "wamid.HBgNOTE5ODc2NTQzMjEw"
+
+
+def test_webhook_payload_missing_message_id():
+    """Missing message ID in payload defaults to empty string."""
+    from whatsapp_client import parse_meta_webhook_payload
+    body = {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "from": "919876543210",
+                        "type": "text",
+                        "text": {"body": "shirt 500"},
+                    }]
+                }
+            }]
+        }]
+    }
+    msgs = parse_meta_webhook_payload(body)
+    assert len(msgs) == 1
+    assert msgs[0]["message_id"] == ""

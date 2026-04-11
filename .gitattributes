@@ -1,0 +1,12 @@
+# Normalize all text files to LF on check-in and check-out.
+# Prevents Windows editors (VS Code, etc.) from introducing CRLF drift
+# that shows up as phantom "M" status with empty `git diff`.
+* text=auto eol=lf
+
+# Explicit binary types — never touch these
+*.pdf    binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.ico    binary
+*.db     binary

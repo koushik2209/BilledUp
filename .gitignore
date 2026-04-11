@@ -30,3 +30,6 @@ Thumbs.db
 .idea/
 .vscode/
 pyrightconfig.json
+
+# Claude Code local settings (user-specific tool permissions)
+.claude/settings.local.json

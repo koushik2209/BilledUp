@@ -62,7 +62,7 @@ def msg_ask_state() -> str:
     lines.append("Reply with your state number:\n")
     for i, (_, name) in enumerate(_STATE_MENU, 1):
         lines.append(f"{i}. {name}")
-    lines.append("14. Other states (type your state name)")
+    lines.append(f"{len(_STATE_MENU) + 1}. Other states (type your state name)")
     lines.append("\nThis ensures your GST (CGST/SGST) is calculated correctly.")
     return "\n".join(lines)
 

@@ -221,6 +221,38 @@ GST_RATES = {
     "sand": {"hsn": "2505", "gst": 5},
     "brick": {"hsn": "6901", "gst": 5},
 
+    # ── TILES & CONSTRUCTION ──
+    # NOTE: more-specific compound keys must appear BEFORE their short prefixes.
+    # Step 1b (word-boundary match) in get_gst_rate_smart iterates in insertion
+    # order and returns the first hit, so "tile adhesive" must be declared
+    # before "tile" or a qualified input like "premium tile adhesive" would
+    # falsely resolve to the ceramic-tiles HSN (wrong HSN = compliance issue).
+    "tile adhesive": {"hsn": "35061000", "gst": 18},
+    "v-bond": {"hsn": "35061000", "gst": 18},
+    "vbond": {"hsn": "35061000", "gst": 18},
+    "bond adhesive": {"hsn": "35061000", "gst": 18},
+    "tile grout": {"hsn": "32141000", "gst": 18},
+    "white grout": {"hsn": "32141000", "gst": 18},
+    "grout": {"hsn": "32141000", "gst": 18},
+    "tile spacer": {"hsn": "39259090", "gst": 18},
+    "spacer": {"hsn": "39259090", "gst": 18},
+    "vitrified tiles": {"hsn": "69072200", "gst": 18},
+    "ceramic tiles": {"hsn": "69072200", "gst": 18},
+    "floor tiles": {"hsn": "69072200", "gst": 18},
+    "wall tiles": {"hsn": "69072200", "gst": 18},
+    "granite tiles": {"hsn": "69072200", "gst": 18},
+    "marble tiles": {"hsn": "69072200", "gst": 18},
+    "mosaic tiles": {"hsn": "69072200", "gst": 18},
+    "porcelain tiles": {"hsn": "69072200", "gst": 18},
+    "parking tiles": {"hsn": "69072200", "gst": 18},
+    "elevation tiles": {"hsn": "69072200", "gst": 18},
+    "tiles": {"hsn": "69072200", "gst": 18},
+    "tile": {"hsn": "69072200", "gst": 18},
+    "marble": {"hsn": "25151200", "gst": 18},
+    "granite": {"hsn": "25161200", "gst": 18},
+    "limestone": {"hsn": "25151100", "gst": 5},
+    "sandstone": {"hsn": "25162000", "gst": 5},
+
     # ── PERSONAL CARE ──
     "shampoo": {"hsn": "3305", "gst": 18},
     "soap": {"hsn": "3401", "gst": 18},

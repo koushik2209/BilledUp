@@ -20,18 +20,34 @@ Two entry points:
 
 ## Main Components
 
-| File | Purpose |
+| Module | Purpose |
 |---|---|
 | `main.py` | Entry point: CLI billing loop, CRUD ops (save/query bills), session management, environment validation. Seeds demo shop "RAVI". |
-| `database.py` | SQLAlchemy models + session helper. Models: `Shop`, `Bill` (with `is_return` flag + `pdf_data` LargeBinary), `SessionRecord`, `InvoiceSequence`, `Registration`, `ConversationLog`, `ReportPDF`. Thread-safe invoice sequence. |
-| `bill_generator.py` | Dataclasses (`BillItem`, `ShopProfile`, `CustomerInfo`, `BillResult`), GST calculation, in-memory PDF generation via ReportLab (returns bytes, no filesystem). Handles TAX INVOICE, BILL OF SUPPLY, and CREDIT NOTE. |
-| `return_detector.py` | Rule-based + fuzzy return/credit note intent detection. Keyword regex, rapidfuzz partial matching, negative price detection. `negate_items()` for credit note processing. No external API calls. |
-| `claude_parser.py` | Sends shopkeeper messages to Claude API for item extraction. Includes rate limiting, retry logic (429/529), input sanitization, prompt injection detection, and a regex fallback parser. |
-| `gst_rates.py` | 200+ hardcoded HSN/GST rate mappings. 5-step lookup: exact → substring → fuzzy (rapidfuzz) → JSON cache → Claude API fallback. |
-| `reports.py` | GST report generation: `get_gst_report()` (DB aggregation), `parse_report_range()` (NL date parsing), `msg_gst_report()` (WhatsApp format), `export_gst_report_pdf()` (returns PDF bytes + filename, no filesystem). Indian number formatting. |
 | `config.py` | Loads `.env`, validates required keys, lazy Anthropic client singleton. Meta WhatsApp (`WHATSAPP_*`, `VERIFY_TOKEN`). |
-| `whatsapp_client.py` | Meta Graph API: send text, template, document by URL; parse webhook payload. |
-| `whatsapp_webhook.py` | Flask app with Meta webhook (GET verify + POST). Full self-registration state machine (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ACTIVE → EXPIRED). Bill preview/confirmation flow before PDF generation. Indian states dict for IGST state selection. REST API endpoints with API key auth. |
+| `whatsapp_webhook.py` | Flask app with Meta webhook (GET verify + POST, HMAC signature validation). Bill preview/confirmation flow routing. REST API endpoints with API key auth. Auto-switches to Gunicorn in production. |
+| `ai/parser.py` | Sends shopkeeper messages to Claude API for item extraction. Rate limiting (100/60s sliding window), retry logic (429/529), sanitization, prompt injection detection. |
+| `ai/sanitizer.py` | Input sanitation (control chars, prompt injection, 1000-char cap) + response validation. |
+| `ai/regex_parser.py` | Rule-based fallback parser (9 patterns). Confidence capped at 0.6. |
+| `api/whatsapp_client.py` | Meta Graph API: send text/template/document, parse webhook payload, retry on 429/5xx. |
+| `api/formatters.py` | WhatsApp message templates (welcome, help, preview, activated, state menu). `_STATE_MENU` drives state selection. |
+| `core/billing.py` | `calculate_bill`, `is_intra_state`, `number_to_words` (Indian lakh/crore). Bill of Supply aware. |
+| `core/invoice.py` | `generate_invoice_number` with `CN-` prefix path for credit notes. |
+| `core/returns.py` | 3-tier return/credit note detection (keyword regex → rapidfuzz → majority-negative). Whitelist (back cover, exchange offer, money back, etc.). |
+| `core/reports.py` | GST report generation and date-range parsing. |
+| `core/gst_rates.py` | 200+ hardcoded HSN/GST mappings. 6-step lookup: shop item master → exact → word-boundary → fuzzy (rapidfuzz) → JSON cache → Claude. Price-based slab adjust for clothing/footwear. |
+| `core/entities/*` | Dataclasses: `BillItem`, `BillResult`, `ShopProfile`, `CustomerInfo`. |
+| `db/models.py` | SQLAlchemy models: `Shop`, `Bill` (with `pdf_data` LargeBinary, `is_return`, `is_igst`), `Registration`, `InvoiceSequence`, `PendingBillRecord`, `ProcessedMessage` (dedup), `ShopItemMaster`, `ConversationLog`, `ReportPDF`, `SessionRecord`. |
+| `db/session.py` | Engine, `db_session()` context manager, `init_database`, `ensure_schema`, `reset_database`, thread-safe `generate_next_sequence`. |
+| `db/crud.py` | API key generation + validation. |
+| `db/item_master.py` | Per-shop item GST memory (`get_item_master`, `save_item_master`, `update_item_gst`, `get_top_items`). |
+| `db/dedup.py` | `try_claim_message` INSERT-FIRST webhook dedup. |
+| `services/router.py` | Main message dispatch. Registration state machine (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ASKED_STATE → ACTIVE → EXPIRED). Invalid states re-prompt (no fake code fallback). |
+| `services/billing.py` | Preview/confirmation flow, `gst report`, `myitems`, `gst <item> <rate>` override, duplicate-bill guard. |
+| `services/pdf_renderer.py` | ReportLab PDF generation: three layouts (CGST+SGST / IGST / Bill of Supply), XML-escaped text, credit-note negation. |
+| `services/pending.py` | `PendingBill` dataclass + DB serialization (10-min expiry, gunicorn-safe). |
+| `services/registration.py` | Registration CRUD, trial management, GSTIN validation, `INDIAN_STATES`, `resolve_state`. |
+
+Root-level modules (`database.py`, `bill_generator.py`, `claude_parser.py`, `gst_rates.py`, `reports.py`, `return_detector.py`, `whatsapp_client.py`) are **backward-compatibility shims** that re-export from the packages above.
 
 ---
 
@@ -104,13 +120,14 @@ Two entry points:
 - **Regex fallback**: If Claude API fails, a rule-based regex parser handles item extraction (confidence capped at 0.6). Patterns are anchored to prevent greedy cross-item matching.
 - **Rate limiting**: 100 calls/60s sliding window on Claude API calls
 - **State defaults**: Telangana / state code 36 (Hyderabad-centric). Customer state defaults to shop state (intra-state) if not provided.
+- **State selection validation**: During `ASKED_STATE` registration, if the user's input can't be resolved to a real GST state code (exact → partial → rapidfuzz WRatio ≥ 60), the bot re-prompts with the state menu instead of storing a fake code. A bogus state_code would silently break `is_intra_state()` and force IGST on every bill. The "Other" menu index is computed from `len(_STATE_MENU) + 1` in both `api/formatters.py` and `services/router.py` — no hardcoded `14`.
 - **GST rate substring matching**: Uses word-boundary regex (`\bterm\b`) instead of raw substring to prevent false positives (e.g., "ac" no longer matches "bracelet")
 - **Cache file**: Uses absolute path (`os.path.dirname(os.path.abspath(__file__))`) with thread-safe read-merge-write to handle concurrent gunicorn workers
 - **PDF storage**: All PDFs (bills and reports) are generated in-memory via BytesIO and stored as `LargeBinary` in PostgreSQL. No filesystem PDF operations. `Bill.pdf_data` for invoices, `ReportPDF` table for GST reports. Served via `/bills/<invoice>.pdf` and `/reports/<filename>` endpoints reading from DB.
 - **PDF safety**: All user-supplied text is XML-escaped before rendering in ReportLab Paragraphs
 - **API key logging**: Truncated to first 8 chars to prevent plaintext credential exposure
 - **Webhook dedup**: INSERT-FIRST pattern via `try_claim_message(message_id)` — attempts INSERT, returns True (new) or False (duplicate via UNIQUE constraint). No check-then-insert race condition. Empty/missing message_id skips dedup with a warning log. Cleanup throttled to every 100 webhook calls (not every request). Uses raw session to keep expected IntegrityError at DEBUG level. Fails open on non-integrity DB errors.
-- **Schema validation at startup**: `ensure_schema()` runs after `init_database()`. Checks required tables and columns against `_REQUIRED_SCHEMA` dict in `database.py` using SQLAlchemy `inspect`. If `DEV_MODE=True` → auto-resets DB (drops all, recreates from models). If `DEV_MODE=False` (production) → logs warnings only, no destructive action. `reset_database()` also deletes the SQLite file for a clean slate. All schema logs use `[DB]` prefix.
+- **Schema validation at startup**: `ensure_schema()` runs after `init_database()`. Checks required tables and columns against `_REQUIRED_SCHEMA` dict in `db/session.py` using SQLAlchemy `inspect`. If `DEV_MODE=True` → auto-resets DB (drops all, recreates from models). If `DEV_MODE=False` (production) → logs warnings only, no destructive action. `reset_database()` also deletes the SQLite file for a clean slate. All schema logs use `[DB]` prefix.
 
 ---
 

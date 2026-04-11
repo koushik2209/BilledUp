@@ -108,12 +108,12 @@ def handle_message(from_number: str, message: str):
         chosen_state = None
         chosen_code  = None
 
-        # Check if user sent a menu number (1-13)
+        # Check if user sent a menu number
         if msg_lower.isdigit():
             idx = int(msg_lower)
             if 1 <= idx <= len(_STATE_MENU):
                 chosen_code, chosen_state = _STATE_MENU[idx - 1]
-            elif idx == 14:
+            elif idx == len(_STATE_MENU) + 1:
                 # "Other states" — ask them to type the name
                 send(from_number, "Please type your state name.\n_Example: Goa_")
                 return
@@ -126,31 +126,28 @@ def handle_message(from_number: str, message: str):
                 chosen_state, chosen_code = resolved
             else:
                 # Fuzzy match against INDIAN_STATES values
-                try:
-                    from rapidfuzz import process as rfprocess, fuzz as rffuzz
-                    state_names = list(INDIAN_STATES.values())
-                    match = rfprocess.extractOne(
-                        message.strip(), state_names,
-                        scorer=rffuzz.WRatio, score_cutoff=60,
-                    )
-                    if match:
-                        matched_name = match[0]
-                        # Find code for matched name
-                        for code, name in INDIAN_STATES.items():
-                            if name == matched_name:
-                                chosen_state, chosen_code = name, code
-                                break
-                except ImportError:
-                    pass
+                from rapidfuzz import process as rfprocess, fuzz as rffuzz
+                state_names = list(INDIAN_STATES.values())
+                match = rfprocess.extractOne(
+                    message.strip(), state_names,
+                    scorer=rffuzz.WRatio, score_cutoff=60,
+                )
+                if match:
+                    matched_name = match[0]
+                    # Find code for matched name
+                    for code, name in INDIAN_STATES.items():
+                        if name == matched_name:
+                            chosen_state, chosen_code = name, code
+                            break
 
                 if not chosen_state:
-                    # Unrecognized — use typed name with unknown code
-                    chosen_state = message.strip().title()
-                    chosen_code  = "99"
+                    # Unrecognized — ask again instead of assigning a fake code.
+                    # A bogus state_code would break intra/inter-state (IGST) detection.
                     send(from_number,
-                        f"⚠️ Could not match \"{message.strip()}\" to a known state. "
-                        f"Using *{chosen_state}* — you can update this later."
+                        f"❌ Could not recognize \"{message.strip()}\" as an Indian state.\n\n"
+                        + msg_ask_state()
                     )
+                    return
 
         # Activate with the chosen state
         invoice_type = "TAX_INVOICE" if gstin else "BILL_OF_SUPPLY"

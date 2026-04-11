@@ -14,7 +14,7 @@
 
 5. **Lazy Anthropic client**: Singleton created on first use (`get_anthropic_client()`). WhatsApp sends go through `whatsapp_client.py` (Meta Graph API) using env `WHATSAPP_*`.
 
-6. **Conversation state machine**: Registration is a multi-step flow (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ACTIVE → EXPIRED). State stored in `Registration.state` column.
+6. **Conversation state machine**: Registration is a multi-step flow (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ASKED_STATE → ACTIVE → EXPIRED). State stored in `Registration.state` column. Lives in `services/router.py`. The `ASKED_STATE` step resolves user input via exact code → exact/partial name → rapidfuzz WRatio (≥60). **Unresolvable input re-prompts** — it does not fall back to a placeholder state_code, because a bogus code would silently break `is_intra_state()` and force IGST on every bill. The "Other states" menu index is derived from `len(_STATE_MENU) + 1` (in `api/formatters.py` and `services/router.py`), not hardcoded.
 
 7. **GST Report system**: `reports.py` handles monthly and date-range GST summaries. WhatsApp command `gst report [range]` triggers DB aggregation → WhatsApp text + PDF. Supports: empty (current month), "last N days", "last month", "this month", month names. PDF generated via ReportLab into BytesIO, stored as `LargeBinary` in `ReportPDF` table. Indian number formatting (lakh/crore system). `GSTReport` dataclass holds all fields.
 
@@ -28,7 +28,7 @@
 
 ## Important Assumptions
 
-- **IGST support**: If `customer.state_code` differs from `shop.state_code` → inter-state → full GST applied as IGST (no CGST/SGST). If same or missing → intra-state → CGST+SGST. Determination via `is_intra_state()` in `bill_generator.py`. Default state is Telangana (code 36).
+- **IGST support**: If `customer.state_code` differs from `shop.state_code` → inter-state → full GST applied as IGST (no CGST/SGST). If same or missing → intra-state → CGST+SGST. Determination via `is_intra_state()` in `core/billing.py`. Default state is Telangana (code 36).
 - **Prices are pre-GST**: The Claude prompt instructs that all prices are before GST. GST is calculated on top.
 - **Quantity defaults to 1**: If not mentioned in the message, qty = 1.
 - **Customer defaults to "Customer"**: If no name is found in the message.
@@ -41,7 +41,7 @@
 
 ## Critical Logic Explanations
 
-### Bill Calculation (`bill_generator.py:calculate_bill`)
+### Bill Calculation (`core/billing.py:calculate_bill`)
 - Accepts `shop_state_code` and `customer_state_code` params to determine tax type
 - For each item: `amount = qty × price`, `gst_amount = amount × rate / 100`
   - **Intra-state**: `cgst = gst_amount / 2`, `sgst = gst_amount - cgst`, `igst = 0`
@@ -51,7 +51,7 @@
 - All amounts rounded to 2 decimal places at each step
 - `BillResult.is_igst` flag drives PDF layout and WhatsApp message formatting
 
-### Message Parsing (`claude_parser.py:parse_message`)
+### Message Parsing (`ai/parser.py:parse_message`)
 - Sanitizes input (control chars, prompt injection patterns, length limit 1000 chars)
 - Checks rate limiter (100 calls/60s sliding window)
 - Sends to Claude with structured system prompt expecting JSON output
@@ -59,13 +59,13 @@
 - Falls back to regex parser if Claude fails or returns invalid JSON
 - Validates response: cleans names, clamps confidence 0–1, skips invalid items
 
-### Regex Fallback Parser (`claude_parser.py:_regex_parse_message`)
+### Regex Fallback Parser (`ai/regex_parser.py:_regex_parse_message`)
 - Handles patterns: `item price`, `item-price`, `item x2 price`, `item 3x price`, `3 item price`
 - Uses span tracking to prevent double-matching
 - Extracts customer name from "bill for X" / "for X" / "to X" prefixes
 - Deduplicates items by (name, price) key
 
-### GST Smart Lookup (`gst_rates.py:get_gst_rate_smart`)
+### GST Smart Lookup (`core/gst_rates.py:get_gst_rate_smart`)
 - 200+ hardcoded items with HSN codes across 12 categories
 - Fuzzy matching uses rapidfuzz `WRatio` scorer (combines multiple strategies)
 - Claude fallback asks for HSN + GST rate, validates against 5 legal slabs, caches result
@@ -100,10 +100,10 @@
 
 ## Things to Remember for Future Development
 
-- **Adding new GST items**: Add to the `GST_RATES` dict in `gst_rates.py`. Format: `"item_name": {"hsn": "XXXX", "gst": N}`. Items found by Claude are auto-cached in `gst_cache.json`.
-- **Changing Claude model**: Model is hardcoded as `claude-sonnet-4-20250514` in both `claude_parser.py` (line 400) and `gst_rates.py` (line 399). Change both.
-- **Database migrations**: No Alembic. Schema changes are caught at startup by `validate_schema()`. In dev (`DEV_MODE=True`), DB auto-resets. In prod, add columns manually or set `DEV_MODE=True` once (WARNING: drops all data). `_REQUIRED_SCHEMA` dict in `database.py` must be updated when adding new tables/columns.
-- **Invoice number format**: `{BILL_PREFIX}-{YEAR}-{SHOP_KEY}-{SEQUENCE:05d}`. Changing format requires updating `generate_invoice_number()` in `bill_generator.py`.
+- **Adding new GST items**: Add to the `GST_RATES` dict in `core/gst_rates.py`. Format: `"item_name": {"hsn": "XXXX", "gst": N}`. More-specific compound keys must be declared *before* their short prefixes (e.g. `"tile adhesive"` before `"tile"`) because Step 1b word-boundary matching iterates in insertion order. Items found by Claude are auto-cached in `gst_cache.json`.
+- **Changing Claude model**: Model is hardcoded as `claude-sonnet-4-20250514` in `ai/parser.py` and `core/gst_rates.py`. Grep for the model ID string and update both call sites.
+- **Database migrations**: No Alembic. Schema changes are caught at startup by `validate_schema()`. In dev (`DEV_MODE=True`), DB auto-resets. In prod, add columns manually or set `DEV_MODE=True` once (WARNING: drops all data). `_REQUIRED_SCHEMA` dict in `db/session.py` must be updated when adding new tables/columns.
+- **Invoice number format**: `{BILL_PREFIX}-{YEAR}-{SHOP_KEY}-{SEQUENCE:05d}`. Changing format requires updating `generate_invoice_number()` in `core/invoice.py`.
 - **Test strategy**: `conftest.py` sets up a temp SQLite DB and fake API key before any imports. Tests avoid live API calls. Run with `pytest`.
 - **Deployment**: Railway via Procfile — `gunicorn whatsapp_webhook:app` with 4 workers. Port from `$PORT` env var.
 - **WhatsApp webhook URL**: Configure in Meta Developer → WhatsApp → Configuration: callback `{BASE_URL}/webhook`, verify token = `VERIFY_TOKEN`.
@@ -134,13 +134,19 @@
 
 9. **Regex parser anchoring**: The `qty_name_price` pattern is anchored with `(?:^|[,\n])` to prevent greedy matching across items (e.g., "rice 50 soap 25" previously misread "50" as quantity for soap).
 
-10. **Claude API empty response**: Both `claude_parser.py` and `gst_rates.py` guard against `response.content` being empty before accessing `[0]`.
+10. **Claude API empty response**: Both `ai/parser.py` and `core/gst_rates.py` guard against `response.content` being empty before accessing `[0]`.
 
-11. **Fuzzy cache bounded**: `_fuzzy_cache` in `gst_rates.py` is capped at 10,000 entries to prevent unbounded memory growth.
+11. **Fuzzy cache bounded**: `_fuzzy_cache` in `core/gst_rates.py` is capped at 10,000 entries to prevent unbounded memory growth.
 
 12. **No `logging.basicConfig` in modules**: Only `main.py` / `whatsapp_webhook.py` should call `basicConfig`. Module-level calls override the root logger level.
 
 13. **`create_all()` won't add columns**: SQLAlchemy's `Base.metadata.create_all()` only creates NEW tables. It does NOT alter existing tables to add missing columns. This is why `validate_schema()` + `reset_database()` exist — to detect and fix the mismatch.
+
+14. **`rapidfuzz` is a hard dependency**: Top-level `from rapidfuzz import fuzz, process, utils` in `core/gst_rates.py` means the app cannot boot without it. Don't wrap `rapidfuzz` imports in `try/except ImportError` anywhere — that's dead code and masks real import errors. It's pinned in `requirements.txt` (`rapidfuzz>=3.0.0`).
+
+15. **Package reorganization**: The codebase is split into `ai/`, `api/`, `core/`, `db/`, `services/`. Root-level files like `database.py`, `bill_generator.py`, `claude_parser.py`, `gst_rates.py`, `reports.py`, `return_detector.py`, `whatsapp_client.py` are **backward-compatibility shims** that re-export from the new packages. When editing, prefer the canonical location in the subpackage; the shim just pulls symbols forward. See `PROJECT_CONTEXT.md` for the full file table.
+
+16. **`gst <item> <rate>` command** (`services/billing.py:_handle_gst_update`): Updates an existing `ShopItemMaster` row if found, otherwise inserts a new confirmed row (HSN taken from `get_gst_rate(item_name)`, defaulting to `"9999"`). Because `get_gst_rate_smart` checks the item master as Step 0, all subsequent bills use the new rate — no restart or cache clear needed.
 
 ---
 

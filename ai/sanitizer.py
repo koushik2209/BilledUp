@@ -23,6 +23,40 @@ _UNIT_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Indian mobile number: optional +91, first digit 6-9, 10 digits total,
+# tolerates a single space or hyphen after the +91 and/or in the middle.
+_PHONE_PATTERN = re.compile(
+    r"(?:\+91[\-\s]?)?[6-9]\d{4}[\-\s]?\d{5}"
+)
+
+
+def extract_customer_phone(text: str) -> str | None:
+    """Extract the first Indian mobile number from free-form text.
+
+    Returns a normalized 10-digit string, or None if nothing matches.
+    Strips +91, spaces, and dashes. Only digits come out.
+    """
+    if not text:
+        return None
+    m = _PHONE_PATTERN.search(text)
+    if not m:
+        return None
+    digits = re.sub(r"\D", "", m.group(0))
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return digits
+    return None
+
+
+def strip_phone_from_name(name: str) -> str:
+    """Remove any phone-like digit runs that leaked into a customer name."""
+    if not name:
+        return name
+    cleaned = _PHONE_PATTERN.sub("", name)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+    return cleaned
+
 
 # ── Input sanitization ──
 def sanitize_message(message: str) -> tuple[str, list]:

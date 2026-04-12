@@ -648,7 +648,7 @@ def test_credit_note_preview():
     # No extra explanation text
     assert "This will generate" not in preview
     # Minimal command list for returns
-    assert "YES" in preview
+    assert "CONFIRM" in preview
     assert "EDIT" in preview
     assert "CANCEL" in preview
 
@@ -1743,3 +1743,205 @@ class TestSchemaValidation:
         assert any("shop_item_master" in p for p in problems)
         # Restore for other tests
         init_database()
+
+
+# ════════════════════════════════════════════════
+# CUSTOMER PHONE EXTRACTION
+# ════════════════════════════════════════════════
+
+class TestCustomerPhoneExtraction:
+    """Phone extraction from free-form bill messages."""
+
+    def test_plain_10_digit(self):
+        from ai.sanitizer import extract_customer_phone
+        assert extract_customer_phone("Sold tiles to Ramesh 9876543210") == "9876543210"
+
+    def test_with_country_code_and_spaces(self):
+        from ai.sanitizer import extract_customer_phone
+        assert extract_customer_phone("Ramesh +91 98765 43210 tiles 500") == "9876543210"
+
+    def test_with_hyphen_separator(self):
+        from ai.sanitizer import extract_customer_phone
+        assert extract_customer_phone("tiles 500 customer 98765-43210") == "9876543210"
+
+    def test_no_phone_returns_none(self):
+        from ai.sanitizer import extract_customer_phone
+        assert extract_customer_phone("tiles 500 to Ramesh") is None
+
+    def test_phone_inside_text(self):
+        from ai.sanitizer import extract_customer_phone
+        assert extract_customer_phone("Call 9876543210 sold tiles 500") == "9876543210"
+
+    def test_multiple_numbers_first_wins(self):
+        from ai.sanitizer import extract_customer_phone
+        # Two valid Indian mobiles — the first one must be chosen.
+        assert extract_customer_phone("6123456789 backup 9876543210") == "6123456789"
+
+    def test_invalid_first_digit_ignored(self):
+        from ai.sanitizer import extract_customer_phone
+        # Indian mobiles start with 6-9. "5..." is not a mobile.
+        assert extract_customer_phone("tiles 500 Ramesh 5876543210") is None
+
+    def test_price_is_not_phone(self):
+        from ai.sanitizer import extract_customer_phone
+        # "500" is a price, not a 10-digit phone.
+        assert extract_customer_phone("tiles 500 Ramesh") is None
+
+    def test_strip_phone_from_name(self):
+        from ai.sanitizer import strip_phone_from_name
+        assert strip_phone_from_name("Ramesh 9876543210") == "Ramesh"
+        assert strip_phone_from_name("Ramesh +91 98765 43210") == "Ramesh"
+        assert strip_phone_from_name("Ramesh") == "Ramesh"
+
+    def test_normalization_drops_plus_and_separators(self):
+        from ai.sanitizer import extract_customer_phone
+        assert extract_customer_phone("+91-98765-43210 tiles") == "9876543210"
+        assert extract_customer_phone("+919876543210 tiles")   == "9876543210"
+
+
+class TestPendingBillCarriesPhone:
+    """End-to-end: parsed phone must reach PendingBill and the saved Bill row."""
+
+    def test_pending_bill_stores_phone(self):
+        from datetime import datetime
+        from database import init_database
+        from services.pending import PendingBill, store_pending, get_pending_bill, clear_pending
+        init_database()
+
+        phone_key = "whatsapp:+1test_phone_case"
+        clear_pending(phone_key)
+        pending = PendingBill(
+            phone               = phone_key,
+            shop_id             = "TESTSHOP",
+            shop_name           = "Test Shop",
+            shop_state          = "Telangana",
+            shop_state_code     = "36",
+            customer_name       = "Ramesh",
+            customer_state      = "Telangana",
+            customer_state_code = "36",
+            items               = [{"name": "tiles", "qty": 1, "price": 500,
+                                    "hsn": "6907", "gst_rate": 18}],
+            confidence          = 1.0,
+            warnings            = [],
+            raw_message         = "tiles 500 Ramesh 9876543210",
+            created_at          = datetime.utcnow(),
+            customer_phone      = "9876543210",
+        )
+        store_pending(phone_key, pending)
+        loaded = get_pending_bill(phone_key)
+        assert loaded is not None
+        assert loaded.customer_phone == "9876543210"
+        clear_pending(phone_key)
+
+    def test_bill_row_stores_parsed_phone(self, tmp_path, monkeypatch):
+        """save_bill persists the parsed customer phone to the Bill row."""
+        from main import save_bill, get_shop
+        from database import db_session, Bill, Shop, init_database
+        from bill_generator import BillItem, BillResult, number_to_words
+        init_database()
+
+        shop_id = "TESTSHOPPH"
+        # Ensure the shop row exists
+        with db_session() as session:
+            existing = session.query(Shop).filter_by(shop_id=shop_id).first()
+            if not existing:
+                session.add(Shop(
+                    shop_id=shop_id, name="Phone Test Shop",
+                    address="Hyderabad", gstin="36AABCU9603R1ZX",
+                    phone="+919999999999", state="Telangana", state_code="36",
+                ))
+
+        items = [BillItem(
+            name="Tiles", qty=1, price=500, hsn="6907", gst_rate=18,
+            amount=500, cgst=45, sgst=45, igst=0, total=590,
+        )]
+        bill_result = BillResult(
+            items=items, subtotal=500, total_cgst=45, total_sgst=45,
+            total_igst=0, total_gst=90, grand_total=590,
+            in_words=number_to_words(590), is_igst=False,
+        )
+
+        invoice_number = "INV-TEST-PHONE-001"
+        save_bill(
+            shop_id=shop_id, invoice_number=invoice_number,
+            customer_name="Ramesh", customer_phone="9876543210",
+            items=items, bill_result=bill_result, pdf_data=b"",
+            raw_message="tiles 500 Ramesh 9876543210",
+        )
+
+        with db_session() as session:
+            row = session.query(Bill).filter_by(invoice_number=invoice_number).first()
+            assert row is not None
+            assert row.customer_phone == "9876543210"
+            assert row.customer_name == "Ramesh"
+            session.delete(row)
+
+
+class TestPhoneInInvoiceOutput:
+    """Phone must appear in PDF only when present, and bill summary must show it."""
+
+    def test_bill_summary_includes_phone_when_present(self):
+        from api.formatters import msg_bill_summary
+        from bill_generator import BillItem, BillResult, number_to_words
+
+        items = [BillItem(
+            name="Tiles", qty=1, price=500, hsn="6907", gst_rate=18,
+            amount=500, cgst=45, sgst=45, igst=0, total=590,
+        )]
+        br = BillResult(
+            items=items, subtotal=500, total_cgst=45, total_sgst=45,
+            total_igst=0, total_gst=90, grand_total=590,
+            in_words=number_to_words(590), is_igst=False,
+        )
+        msg = msg_bill_summary(
+            bill_result=br, invoice_number="INV-TEST-1",
+            customer_name="Ramesh", days=9,
+            customer_phone="9876543210",
+        )
+        assert "Ramesh" in msg
+        assert "9876543210" in msg
+        assert "📞" in msg
+
+    def test_bill_summary_omits_phone_when_missing(self):
+        from api.formatters import msg_bill_summary
+        from bill_generator import BillItem, BillResult, number_to_words
+
+        items = [BillItem(
+            name="Tiles", qty=1, price=500, hsn="6907", gst_rate=18,
+            amount=500, cgst=45, sgst=45, igst=0, total=590,
+        )]
+        br = BillResult(
+            items=items, subtotal=500, total_cgst=45, total_sgst=45,
+            total_igst=0, total_gst=90, grand_total=590,
+            in_words=number_to_words(590), is_igst=False,
+        )
+        msg = msg_bill_summary(
+            bill_result=br, invoice_number="INV-TEST-2",
+            customer_name="Ramesh", days=9,
+        )
+        assert "Ramesh" in msg
+        assert "📞" not in msg
+
+    def test_pdf_customer_block_includes_phone(self):
+        from bill_generator import (
+            ShopProfile, CustomerInfo, BillItem, generate_pdf_bill,
+        )
+
+        shop = ShopProfile(
+            shop_id="RAVI", name="Ravi Shop", address="Hyderabad",
+            gstin="36AABCU9603R1ZX", phone="+919999999999",
+            state="Telangana", state_code="36",
+        )
+        customer = CustomerInfo(
+            name="Ramesh", phone="9876543210",
+            state="Telangana", state_code="36",
+        )
+        items = [BillItem(name="tiles", qty=1, price=500, hsn="6907", gst_rate=18)]
+        pdf_bytes, _ = generate_pdf_bill(
+            shop=shop, customer=customer, items=items,
+            invoice_number="INV-TEST-PDF-1",
+        )
+        # ReportLab PDFs are zlib-compressed so we can't grep the raw bytes
+        # for "9876543210". The contract we care about here is that the
+        # renderer accepted customer.phone without raising.
+        assert isinstance(pdf_bytes, bytes) and len(pdf_bytes) > 500

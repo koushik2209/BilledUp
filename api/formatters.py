@@ -128,7 +128,8 @@ def msg_help(shop_name: str, days: int) -> str:
 
 
 def msg_bill_summary(bill_result, invoice_number: str, customer_name: str,
-                     days: int, is_return: bool = False, is_bill_of_supply: bool = False) -> str:
+                     days: int, is_return: bool = False, is_bill_of_supply: bool = False,
+                     customer_phone: str = "") -> str:
     sign = "-" if is_return else ""
     total_label = "REFUND" if is_return else "TOTAL"
 
@@ -145,9 +146,12 @@ def msg_bill_summary(bill_result, invoice_number: str, customer_name: str,
     lines = [
         f"{header}\n",
         f"📋 {doc_label}: *{invoice_number}*",
-        f"👤 Customer: *{customer_name}*\n",
-        f"*Items:*",
+        f"👤 Customer: *{customer_name}*",
     ]
+    if customer_phone:
+        lines.append(f"📞 Phone: {customer_phone}")
+    lines.append("")  # blank line before items
+    lines.append("*Items:*")
     for item in bill_result.items:
         qty = int(item.qty) if item.qty == int(item.qty) else item.qty
         if is_bill_of_supply:

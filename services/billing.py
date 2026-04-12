@@ -198,6 +198,8 @@ def msg_preview(pending: PendingBill) -> str:
             "📋 *Bill Preview*\n",
             f"👤 Customer: *{pending.customer_name}*",
         ]
+    if pending.customer_phone:
+        lines.append(f"📞 Phone: {pending.customer_phone}")
 
     # ── Invoice type + state/tax type ──
     if pending.is_bill_of_supply:
@@ -479,6 +481,7 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             is_return          = is_return,
             is_bill_of_supply  = is_bos,
             is_inclusive       = default_inclusive and not is_bos,
+            customer_phone     = parsed.get("customer_phone") or "",
         )
 
         store_pending(from_number, pending)
@@ -675,6 +678,7 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             customer_name = parsed.get("customer_name", pending.customer_name)
             pending.items       = bill_items
             pending.customer_name = customer_name
+            pending.customer_phone = parsed.get("customer_phone") or pending.customer_phone
             pending.confidence  = parsed.get("confidence", 1.0)
             pending.warnings    = parsed.get("warnings", [])
             pending.raw_message = message
@@ -774,6 +778,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
 
         customer = CustomerInfo(
             name       = pending.customer_name,
+            phone      = pending.customer_phone or "",
             state      = pending.customer_state,
             state_code = pending.customer_state_code,
         )
@@ -804,7 +809,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
                     shop_id        = pending.shop_id,
                     invoice_number = invoice_number,
                     customer_name  = pending.customer_name,
-                    customer_phone = from_number,
+                    customer_phone = pending.customer_phone or "",
                     items          = bill_result.items,
                     bill_result    = bill_result,
                     pdf_data       = pdf_data,
@@ -857,6 +862,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             days              = d_left,
             is_return         = pending.is_return,
             is_bill_of_supply = pending.is_bill_of_supply,
+            customer_phone    = pending.customer_phone or "",
         )
         send(from_number, summary)
 

@@ -15,7 +15,10 @@ from collections import deque
 from anthropic.types import TextBlock
 
 from config import get_anthropic_client
-from ai.sanitizer import sanitize_message, validate_parsed_response
+from ai.sanitizer import (
+    sanitize_message, validate_parsed_response,
+    extract_customer_phone, strip_phone_from_name,
+)
 from ai.regex_parser import _regex_parse_message
 
 log = logging.getLogger("billedup.parser")
@@ -106,6 +109,7 @@ def parse_message(message: str) -> dict:
     start_time = time.time()
 
     clean_message, warnings = sanitize_message(message)
+    parsed_phone = extract_customer_phone(clean_message) if clean_message else None
 
     if not clean_message:
         return _error_result("Empty or invalid message", warnings=warnings,
@@ -185,6 +189,7 @@ def parse_message(message: str) -> dict:
         fallback["warnings"] = warnings + fallback.get("warnings", [])
         fallback["warnings"].append(f"Claude API unavailable: {last_error or 'no response'}")
         fallback["parse_time_ms"] = _elapsed_ms(start_time)
+        _apply_phone(fallback, parsed_phone)
         return fallback
 
     try:
@@ -197,6 +202,7 @@ def parse_message(message: str) -> dict:
         fallback["warnings"] = warnings + fallback.get("warnings", [])
         fallback["warnings"].append(f"Claude returned invalid JSON: {e}")
         fallback["parse_time_ms"] = _elapsed_ms(start_time)
+        _apply_phone(fallback, parsed_phone)
         return fallback
 
     result, issues = validate_parsed_response(result)
@@ -214,6 +220,7 @@ def parse_message(message: str) -> dict:
 
     result["warnings"]      = warnings
     result["parse_time_ms"] = _elapsed_ms(start_time)
+    _apply_phone(result, parsed_phone)
 
     log.info(
         f"Parsed: customer='{result['customer_name']}' "
@@ -224,17 +231,27 @@ def parse_message(message: str) -> dict:
     return result
 
 
+def _apply_phone(result: dict, phone: str | None) -> None:
+    """Attach parsed customer_phone and strip any phone digits from the name."""
+    result["customer_phone"] = phone
+    if phone and result.get("customer_name"):
+        cleaned = strip_phone_from_name(result["customer_name"])
+        if cleaned:
+            result["customer_name"] = cleaned
+
+
 def _error_result(error: str, warnings: list | None = None,
                   parse_time_ms: int = 0) -> dict:
     log.error(f"Parse failed: {error}")
     return {
-        "customer_name": "Customer",
-        "items":         [],
-        "confidence":    0.0,
-        "notes":         "",
-        "error":         error,
-        "warnings":      warnings or [],
-        "parse_time_ms": parse_time_ms,
+        "customer_name":  "Customer",
+        "customer_phone": None,
+        "items":          [],
+        "confidence":     0.0,
+        "notes":          "",
+        "error":          error,
+        "warnings":       warnings or [],
+        "parse_time_ms":  parse_time_ms,
     }
 
 def _elapsed_ms(start: float) -> int:

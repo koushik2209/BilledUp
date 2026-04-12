@@ -37,6 +37,7 @@ class PendingBill:
     is_return: bool = False
     is_bill_of_supply: bool = False
     is_inclusive: bool = False
+    customer_phone: str = ""
 
 
 def _serialize_pending(bill: PendingBill) -> str:
@@ -60,6 +61,7 @@ def _serialize_pending(bill: PendingBill) -> str:
         "is_return": bill.is_return,
         "is_bill_of_supply": bill.is_bill_of_supply,
         "is_inclusive": bill.is_inclusive,
+        "customer_phone": bill.customer_phone,
     }
     return json.dumps(data)
 
@@ -71,6 +73,7 @@ def _deserialize_pending(json_str: str) -> PendingBill:
     # Backwards compat: old pending bills in DB won't have these fields
     data.setdefault("is_bill_of_supply", False)
     data.setdefault("is_inclusive", False)
+    data.setdefault("customer_phone", "")
     return PendingBill(**data)
 
 

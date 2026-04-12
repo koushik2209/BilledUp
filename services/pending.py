@@ -36,6 +36,7 @@ class PendingBill:
     state_assumed: bool = True
     is_return: bool = False
     is_bill_of_supply: bool = False
+    is_inclusive: bool = False
 
 
 def _serialize_pending(bill: PendingBill) -> str:
@@ -58,6 +59,7 @@ def _serialize_pending(bill: PendingBill) -> str:
         "state_assumed": bill.state_assumed,
         "is_return": bill.is_return,
         "is_bill_of_supply": bill.is_bill_of_supply,
+        "is_inclusive": bill.is_inclusive,
     }
     return json.dumps(data)
 
@@ -66,8 +68,9 @@ def _deserialize_pending(json_str: str) -> PendingBill:
     """Deserialize JSON string back to PendingBill."""
     data = json.loads(json_str)
     data["created_at"] = datetime.fromisoformat(data["created_at"])
-    # Backwards compat: old pending bills in DB won't have this field
+    # Backwards compat: old pending bills in DB won't have these fields
     data.setdefault("is_bill_of_supply", False)
+    data.setdefault("is_inclusive", False)
     return PendingBill(**data)
 
 

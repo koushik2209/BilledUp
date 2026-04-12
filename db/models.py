@@ -27,6 +27,7 @@ class Shop(Base):
     upi        = Column(String(100), default="")
     state      = Column(String(50), default="")
     state_code = Column(String(5), default="")
+    default_pricing = Column(String(10), default="exclusive")
     api_key    = Column(String(64), unique=True, nullable=True, index=True)
     active     = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -70,11 +70,14 @@ def calculate_bill(
     shop_state_code: str = "",
     customer_state_code: str = "",
     bill_of_supply: bool = False,
+    is_inclusive: bool = False,
 ) -> BillResult:
     """Calculate bill totals.
 
     bill_of_supply=True → all GST is zero (shop has no GSTIN).
     Items still get HSN codes for record-keeping but gst_rate is forced to 0%.
+    is_inclusive=True  → each item price is the GST-inclusive unit price;
+    the taxable base is backed out as price / (1 + rate/100).
     """
     if not items:
         raise ValueError("Cannot generate bill — no items provided")
@@ -119,8 +122,14 @@ def calculate_bill(
             log.warning(f"Invalid slab {gst_rate}% for '{name}' — correcting to 18%")
             gst_rate = 18
 
-        amount  = round(qty * price, 2)
-        gst_amt = round(amount * gst_rate / 100, 2)
+        if is_inclusive and not bill_of_supply and gst_rate > 0:
+            # Price already includes GST — back out the base.
+            base_unit = round(price / (1 + gst_rate / 100), 2)
+            amount  = round(qty * base_unit, 2)
+            gst_amt = round(qty * price - amount, 2)
+        else:
+            amount  = round(qty * price, 2)
+            gst_amt = round(amount * gst_rate / 100, 2)
 
         if bill_of_supply:
             cgst = sgst = igst = 0.0

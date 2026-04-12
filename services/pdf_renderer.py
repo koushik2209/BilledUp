@@ -85,6 +85,7 @@ def generate_pdf_bill(
     invoice_number: str,
     gst_client=None,
     is_return:      bool = False,
+    is_inclusive:   bool = False,
 ) -> tuple[bytes, BillResult]:
     """
     Generate a GST bill PDF in memory.
@@ -106,6 +107,7 @@ def generate_pdf_bill(
     bill = calculate_bill(
         items, gst_client, shop.state_code, customer.state_code,
         bill_of_supply=not shop.has_gstin,
+        is_inclusive=is_inclusive,
     )
 
     # For credit notes, negate all monetary values in the result

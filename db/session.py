@@ -68,7 +68,7 @@ _REQUIRED_SCHEMA = {
     "bills":              ["pdf_data", "is_return", "is_igst"],
     "registrations":      ["invoice_type", "state_name", "state_code"],
     "conversation_log":   ["phone", "direction", "message"],
-    "shops":              ["api_key", "state", "state_code", "upi"],
+    "shops":              ["api_key", "state", "state_code", "upi", "default_pricing"],
 }
 
 

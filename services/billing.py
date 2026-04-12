@@ -20,7 +20,7 @@ from bill_generator import (
     generate_invoice_number, generate_pdf_bill, calculate_bill,
     PLACEHOLDER_GSTIN, VALID_GST_SLABS,
 )
-from database import db_session, Bill, ReportPDF
+from database import db_session, Bill, ReportPDF, Shop
 from reports import (
     get_gst_report, parse_report_range, msg_gst_report,
     export_gst_report_pdf,
@@ -168,6 +168,7 @@ def _compute_preview_totals(pending: PendingBill) -> dict:
             shop_state_code=pending.shop_state_code,
             customer_state_code=pending.customer_state_code,
             bill_of_supply=pending.is_bill_of_supply,
+            is_inclusive=pending.is_inclusive,
         )
         # For credit notes, negate all amounts
         sign = -1 if pending.is_return else 1
@@ -250,6 +251,16 @@ def msg_preview(pending: PendingBill) -> str:
         if pending.is_bill_of_supply:
             # Bill of Supply: total = subtotal, no GST breakdown
             lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'}: {sign}Rs.{abs(totals['subtotal']):.2f}*")
+        elif pending.is_inclusive:
+            # Inclusive: show grand total first, then backed-out base + GST
+            lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'} (incl GST): {sign}Rs.{abs(totals['grand_total']):.2f}*")
+            lines.append(f"Base:      {sign}Rs.{abs(totals['subtotal']):.2f}")
+            if totals["is_igst"]:
+                lines.append(f"IGST:      {sign}Rs.{abs(totals['total_igst']):.2f}")
+            else:
+                lines.append(f"CGST:      {sign}Rs.{abs(totals['total_cgst']):.2f}")
+                lines.append(f"SGST:      {sign}Rs.{abs(totals['total_sgst']):.2f}")
+            lines.append(f"Total GST: {sign}Rs.{abs(totals['total_gst']):.2f}")
         else:
             lines.append(f"Subtotal: {sign}Rs.{abs(totals['subtotal']):.2f}")
             if totals["is_igst"]:
@@ -274,7 +285,12 @@ def msg_preview(pending: PendingBill) -> str:
     # ── Commands ──
     lines.append(f"\n━━━━━━━━━━━━━━━━━")
     lines.append(f"Reply:")
-    lines.append(f"• *YES* → Confirm")
+    lines.append(f"• *CONFIRM* → Create bill")
+    if not pending.is_bill_of_supply:
+        if pending.is_inclusive:
+            lines.append(f"• *EXCLUDE* → Prices are BEFORE GST")
+        else:
+            lines.append(f"• *INCLUDE* → Prices already INCLUDE GST")
     lines.append(f"• *EDIT* → Re-enter items")
     if not pending.is_bill_of_supply:
         lines.append(f"• *GST 1 12* or *shirt gst 12* → Fix rate")
@@ -295,6 +311,7 @@ _CONFIRM_COMMANDS = frozenset({
     "cancel", "no", "discard",
     "edit", "change", "redo",
     "change state", "state", "igst",
+    "include", "inclusive", "exclude", "exclusive",
 })
 
 def _is_confirmation_command(msg_lower: str) -> bool:
@@ -345,6 +362,34 @@ def _handle_gst_report(from_number: str, msg_lower: str, shop_id: str, shop_name
 
 
 # ════════════════════════════════════════════════
+# SHOP PRICING PREFERENCE HELPERS
+# ════════════════════════════════════════════════
+
+def _get_shop_default_inclusive(shop_id: str) -> bool:
+    """Return True if the shop's default_pricing is 'inclusive'."""
+    try:
+        with db_session() as session:
+            row = session.query(Shop).filter_by(shop_id=shop_id.upper()).first()
+            if row and (row.default_pricing or "").lower() == "inclusive":
+                return True
+    except Exception as e:
+        log.warning(f"Shop pricing lookup failed for {shop_id}: {e}")
+    return False
+
+
+def _save_shop_default_pricing(shop_id: str, is_inclusive: bool):
+    """Persist the last-used pricing mode as the shop's default for next bill."""
+    pref = "inclusive" if is_inclusive else "exclusive"
+    try:
+        with db_session() as session:
+            row = session.query(Shop).filter_by(shop_id=shop_id.upper()).first()
+            if row and (row.default_pricing or "") != pref:
+                row.default_pricing = pref
+    except Exception as e:
+        log.warning(f"Shop pricing save failed for {shop_id}: {e}")
+
+
+# ════════════════════════════════════════════════
 # CONFIRMATION FLOW HANDLERS
 # ════════════════════════════════════════════════
 
@@ -378,6 +423,9 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
         else:
             shop_state      = reg.get("state_name", "")
             shop_state_code = reg.get("state_code", "")
+
+        # Load shop's default pricing preference (inclusive vs exclusive)
+        default_inclusive = _get_shop_default_inclusive(shop_id)
 
         # Determine invoice type from registration
         is_bos = reg.get("invoice_type") == "BILL_OF_SUPPLY"
@@ -430,6 +478,7 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             created_at         = datetime.utcnow(),
             is_return          = is_return,
             is_bill_of_supply  = is_bos,
+            is_inclusive       = default_inclusive and not is_bos,
         )
 
         store_pending(from_number, pending)
@@ -487,6 +536,26 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
     if msg_lower in ("cancel", "no", "discard"):
         clear_pending(from_number)
         send(from_number, "❌ Bill discarded.\n\nSend a new message to create another bill.")
+        return
+
+    # INCLUDE / EXCLUDE — toggle GST pricing mode on the pending bill
+    if msg_lower in ("include", "inclusive", "exclude", "exclusive"):
+        if pending.is_bill_of_supply:
+            send(from_number,
+                "ℹ️ This is a Bill of Supply — no GST is applied, "
+                "so inclusive/exclusive does not apply."
+            )
+            return
+        new_mode = msg_lower in ("include", "inclusive")
+        pending.is_inclusive = new_mode
+        pending.created_at = datetime.utcnow()  # refresh expiry
+        store_pending(from_number, pending)
+        header = (
+            "✅ Prices marked as *GST inclusive*."
+            if new_mode else
+            "✅ Prices marked as *GST exclusive*."
+        )
+        send(from_number, f"{header}\n\n{msg_preview(pending)}")
         return
 
     # NAME <name>
@@ -724,6 +793,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             invoice_number = invoice_number,
             gst_client     = get_anthropic_client(),
             is_return      = pending.is_return,
+            is_inclusive   = pending.is_inclusive,
         )
 
         # Save to database (retry once, warn user on failure)
@@ -753,6 +823,10 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
                 f"⚠️ Bill {invoice_number} was generated but could not be saved to our records. "
                 f"Please keep this invoice number and contact support: +91 7981053846"
             )
+
+        # Remember the pricing mode the user just used as their default
+        if db_saved and not pending.is_bill_of_supply:
+            _save_shop_default_pricing(pending.shop_id, pending.is_inclusive)
 
         # Auto-save items to shop item master (confirmed=True)
         try:

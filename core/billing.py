@@ -126,13 +126,26 @@ def calculate_bill(
             log.warning(f"Invalid slab {gst_rate}% for '{name}' — correcting to 18%")
             gst_rate = 18
 
-        if is_inclusive and not bill_of_supply and gst_rate > 0:
-            # Price already includes GST — back out the base.
-            base_unit = round(price / (1 + gst_rate / 100), 2)
-            amount  = round(qty * base_unit, 2)
-            gst_amt = round(qty * price - amount, 2)
+        raw_amount = round(qty * price, 2)
+
+        # ── Item-level discount ──
+        i_disc_type = getattr(item, "item_discount_type", "none") or "none"
+        i_disc_val  = float(getattr(item, "item_discount_value", 0.0) or 0.0)
+        if i_disc_type == "percent":
+            pct = max(0.0, min(100.0, i_disc_val))
+            item_discount = round(raw_amount * pct / 100, 2)
+        elif i_disc_type == "flat":
+            item_discount = round(min(max(0.0, i_disc_val), raw_amount), 2)
         else:
-            amount  = round(qty * price, 2)
+            item_discount = 0.0
+        discounted_line_total = round(raw_amount - item_discount, 2)
+
+        if is_inclusive and not bill_of_supply and gst_rate > 0:
+            # Discounted line total is GST-inclusive — back out the base.
+            amount  = round(discounted_line_total / (1 + gst_rate / 100), 2)
+            gst_amt = round(discounted_line_total - amount, 2)
+        else:
+            amount  = discounted_line_total
             gst_amt = round(amount * gst_rate / 100, 2)
 
         if bill_of_supply:
@@ -153,7 +166,9 @@ def calculate_bill(
             name=name.title(), qty=qty, price=price,
             hsn=hsn, gst_rate=gst_rate, amount=amount,
             cgst=cgst, sgst=sgst, igst=igst, total=total,
-            raw_amount=round(qty * price, 2),
+            raw_amount=raw_amount,
+            item_discount_type=i_disc_type,
+            item_discount_value=i_disc_val,
         ))
 
     subtotal    = round(subtotal, 2)

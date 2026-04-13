@@ -236,3 +236,203 @@ def test_calculate_bill_bill_percent_discount_clamps_to_100():
     )
     assert result.taxable_amount == 0.0
     assert result.grand_total == 0.0
+
+
+# ─────────────────────────────────────────────
+# SAFEGUARDS — invariants that must hold for every discount path
+# ─────────────────────────────────────────────
+
+def _assert_bill_invariants(result, *, pre_subtotal_expected=None):
+    """Conservation + GST split checks. Run on every BillResult."""
+    # 1. grand_total = subtotal + total_gst (rupees, not paise)
+    assert result.grand_total == round(result.subtotal + result.total_gst, 2), (
+        f"grand_total drift: {result.grand_total} vs {result.subtotal}+{result.total_gst}"
+    )
+
+    # 2. Total GST = CGST + SGST + IGST
+    assert result.total_gst == round(
+        result.total_cgst + result.total_sgst + result.total_igst, 2
+    )
+
+    # 3. Intra-state → no IGST; inter-state → no CGST/SGST.
+    if result.is_igst:
+        assert result.total_cgst == 0.0 and result.total_sgst == 0.0
+    else:
+        assert result.total_igst == 0.0
+
+    # 4. Per-item splits sum to the totals (within 1 paisa per item for rounding).
+    s_cgst = round(sum(i.cgst for i in result.items), 2)
+    s_sgst = round(sum(i.sgst for i in result.items), 2)
+    s_igst = round(sum(i.igst for i in result.items), 2)
+    tol = 0.01 * max(len(result.items), 1)
+    assert abs(s_cgst - result.total_cgst) <= tol
+    assert abs(s_sgst - result.total_sgst) <= tol
+    assert abs(s_igst - result.total_igst) <= tol
+
+    # 5. sum(item.total) == grand_total (within 1 paisa per item).
+    s_tot = round(sum(i.total for i in result.items), 2)
+    assert abs(s_tot - result.grand_total) <= tol
+
+    # 6. No negative totals from clamping paths.
+    assert result.subtotal >= 0
+    assert result.total_gst >= 0
+    assert result.grand_total >= 0
+    assert result.taxable_amount >= 0
+    assert result.discount_total >= 0
+
+    # 7. Discount bookkeeping: pre - discount == scaled-line sum.
+    #    Exclusive → scaled-line sum == subtotal.
+    #    Inclusive → scaled-line sum == taxable_amount (lump, GST still inside).
+    if result.pricing_type == "inclusive":
+        scaled_sum = result.taxable_amount
+    else:
+        scaled_sum = result.subtotal
+    assert abs(
+        (result.subtotal_before_bill_discount - result.discount_total) - scaled_sum
+    ) <= 0.05, (
+        f"discount bookkeeping drift: "
+        f"{result.subtotal_before_bill_discount} - {result.discount_total} "
+        f"!= {scaled_sum}"
+    )
+
+    # 8. Inclusive → grand_total == taxable_amount (GST already inside).
+    #    Exclusive → grand_total == taxable_amount + total_gst.
+    if result.pricing_type == "inclusive":
+        assert abs(result.grand_total - result.taxable_amount) <= 0.05
+    else:
+        assert abs(
+            result.grand_total - (result.taxable_amount + result.total_gst)
+        ) <= 0.05
+
+    # 9. Optional: caller supplies the pre-bill subtotal they expect.
+    if pre_subtotal_expected is not None:
+        assert result.subtotal_before_bill_discount == pre_subtotal_expected
+
+
+def test_safeguard_conservation_across_all_discount_paths():
+    """Conservation invariant holds across every discount combination."""
+    scenarios = [
+        # (label, items_kwargs, call_kwargs)
+        ("no discount exclusive",
+         [{"name": "pen", "qty": 2, "price": 50, "hsn": "9608", "gst_rate": 18}],
+         {}),
+        ("no discount inclusive",
+         [{"name": "pen", "qty": 1, "price": 118, "hsn": "9608", "gst_rate": 18}],
+         {"is_inclusive": True}),
+        ("item percent",
+         [{"name": "tiles", "qty": 10, "price": 50, "hsn": "6907", "gst_rate": 18,
+           "item_discount_type": "percent", "item_discount_value": 10}],
+         {}),
+        ("item flat",
+         [{"name": "shirt", "qty": 1, "price": 500, "hsn": "6205", "gst_rate": 5,
+           "item_discount_type": "flat", "item_discount_value": 50}],
+         {}),
+        ("bill flat single rate",
+         [{"name": "rice", "qty": 1, "price": 1000, "hsn": "1006", "gst_rate": 5}],
+         {"bill_discount_type": "flat", "bill_discount_value": 100}),
+        ("bill percent mixed rates",
+         [{"name": "rice", "qty": 1, "price": 1000, "hsn": "1006", "gst_rate": 5},
+          {"name": "soap", "qty": 1, "price": 1000, "hsn": "3401", "gst_rate": 18}],
+         {"bill_discount_type": "percent", "bill_discount_value": 10}),
+        ("stacked item + bill",
+         [{"name": "tiles", "qty": 10, "price": 50, "hsn": "6907", "gst_rate": 18,
+           "item_discount_type": "percent", "item_discount_value": 10},
+          {"name": "grout", "qty": 1, "price": 200, "hsn": "3214", "gst_rate": 18}],
+         {"bill_discount_type": "flat", "bill_discount_value": 50}),
+        ("inclusive + bill flat",
+         [{"name": "rice", "qty": 1, "price": 1050, "hsn": "1006", "gst_rate": 5}],
+         {"is_inclusive": True, "bill_discount_type": "flat",
+          "bill_discount_value": 50}),
+        ("inclusive + item percent",
+         [{"name": "rice", "qty": 1, "price": 1050, "hsn": "1006", "gst_rate": 5,
+           "item_discount_type": "percent", "item_discount_value": 10}],
+         {"is_inclusive": True}),
+        ("inter-state percent",
+         [{"name": "rice", "qty": 1, "price": 1000, "hsn": "1006", "gst_rate": 5}],
+         {"customer_state_code": "29", "bill_discount_type": "percent",
+          "bill_discount_value": 10}),
+    ]
+    for label, items_kw, call_kw in scenarios:
+        items = [BillItem(**kw) for kw in items_kw]
+        call_kw.setdefault("shop_state_code", "36")
+        call_kw.setdefault("customer_state_code", "36")
+        result = calculate_bill(items, **call_kw)
+        try:
+            _assert_bill_invariants(result)
+        except AssertionError as e:
+            raise AssertionError(f"[{label}] {e}") from e
+
+
+def test_safeguard_gst_split_per_item_consistency():
+    """Each item's cgst+sgst+igst matches the tax-type rule exactly."""
+    items = [
+        BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5),
+        BillItem(name="soap", qty=1, price=500, hsn="3401", gst_rate=18),
+        BillItem(name="tiles", qty=10, price=50, hsn="6907", gst_rate=18,
+                 item_discount_type="percent", item_discount_value=10),
+    ]
+    # Intra
+    r_intra = calculate_bill(items, shop_state_code="36", customer_state_code="36",
+                             bill_discount_type="flat", bill_discount_value=75)
+    for it in r_intra.items:
+        assert it.igst == 0.0
+        # CGST ≈ SGST (halved; off by ≤ 1 paisa from rounding)
+        assert abs(it.cgst - it.sgst) <= 0.01
+        # cgst + sgst == gst on (qty*price) post-all-discounts (approx)
+        expected = round(it.amount * it.gst_rate / 100, 2)
+        assert abs((it.cgst + it.sgst) - expected) <= 0.02
+    _assert_bill_invariants(r_intra)
+
+    # Inter
+    r_inter = calculate_bill(items, shop_state_code="36", customer_state_code="29",
+                             bill_discount_type="flat", bill_discount_value=75)
+    for it in r_inter.items:
+        assert it.cgst == 0.0
+        assert it.sgst == 0.0
+        expected = round(it.amount * it.gst_rate / 100, 2)
+        assert abs(it.igst - expected) <= 0.02
+    _assert_bill_invariants(r_inter)
+
+    # Intra and inter have identical grand totals on same items.
+    assert r_intra.grand_total == r_inter.grand_total
+    assert r_intra.total_gst == r_inter.total_gst
+
+
+def test_safeguard_over_discount_flat_clamps_and_invariants_hold():
+    """Flat discount > subtotal clamps to subtotal; invariants still hold."""
+    items = [BillItem(name="rice", qty=1, price=100, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="flat", bill_discount_value=500,
+    )
+    assert result.subtotal_before_bill_discount == 100.0
+    assert result.discount_total == 100.0      # clamped to pre-subtotal
+    assert result.taxable_amount == 0.0
+    assert result.grand_total == 0.0
+    _assert_bill_invariants(result, pre_subtotal_expected=100.0)
+
+
+def test_safeguard_over_discount_percent_clamps_and_invariants_hold():
+    """Percent > 100 clamps to 100; invariants still hold."""
+    items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="percent", bill_discount_value=250,
+    )
+    assert result.taxable_amount == 0.0
+    assert result.grand_total == 0.0
+    _assert_bill_invariants(result, pre_subtotal_expected=1000.0)
+
+
+def test_safeguard_negative_percent_is_noop():
+    """Negative percent is rejected (treated as no discount)."""
+    items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="percent", bill_discount_value=-10,
+    )
+    # No-op: grand_total is the natural 1050
+    assert result.discount_total == 0.0
+    assert result.taxable_amount == 1000.0
+    assert result.grand_total == 1050.0
+    _assert_bill_invariants(result, pre_subtotal_expected=1000.0)

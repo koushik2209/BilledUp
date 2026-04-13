@@ -17,6 +17,9 @@ class BillItem:
     sgst:     float = 0.0
     igst:     float = 0.0
     total:    float = 0.0
+    item_discount_type:  str   = "none"   # "none" | "percent" | "flat"
+    item_discount_value: float = 0.0
+    raw_amount:          float = 0.0      # qty * price, pre-discount
 
     def validate(self):
         if not self.name or not self.name.strip():

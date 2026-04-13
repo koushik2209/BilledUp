@@ -26,17 +26,17 @@ Two entry points:
 | `config.py` | Loads `.env`, validates required keys, lazy Anthropic client singleton. Meta WhatsApp (`WHATSAPP_*`, `VERIFY_TOKEN`). |
 | `whatsapp_webhook.py` | Flask app with Meta webhook (GET verify + POST, HMAC signature validation). Bill preview/confirmation flow routing. REST API endpoints with API key auth. Auto-switches to Gunicorn in production. |
 | `ai/parser.py` | Sends shopkeeper messages to Claude API for item extraction. Rate limiting (100/60s sliding window), retry logic (429/529), sanitization, prompt injection detection. |
-| `ai/sanitizer.py` | Input sanitation (control chars, prompt injection, 1000-char cap) + response validation. |
+| `ai/sanitizer.py` | Input sanitation (control chars, prompt injection, 1000-char cap) + response validation. Also `extract_customer_phone()` / `strip_phone_from_name()` — regex-based Indian mobile detection (+91/spaces/dashes tolerant, returns normalized 10-digit). |
 | `ai/regex_parser.py` | Rule-based fallback parser (9 patterns). Confidence capped at 0.6. |
 | `api/whatsapp_client.py` | Meta Graph API: send text/template/document, parse webhook payload, retry on 429/5xx. |
 | `api/formatters.py` | WhatsApp message templates (welcome, help, preview, activated, state menu). `_STATE_MENU` drives state selection. |
-| `core/billing.py` | `calculate_bill`, `is_intra_state`, `number_to_words` (Indian lakh/crore). Bill of Supply aware. |
+| `core/billing.py` | `calculate_bill`, `is_intra_state`, `number_to_words` (Indian lakh/crore). Bill of Supply aware. Supports `is_inclusive=True` to back out GST from prices (`base = price / (1 + rate/100)`). |
 | `core/invoice.py` | `generate_invoice_number` with `CN-` prefix path for credit notes. |
 | `core/returns.py` | 3-tier return/credit note detection (keyword regex → rapidfuzz → majority-negative). Whitelist (back cover, exchange offer, money back, etc.). |
 | `core/reports.py` | GST report generation and date-range parsing. |
 | `core/gst_rates.py` | 200+ hardcoded HSN/GST mappings. 6-step lookup: shop item master → exact → word-boundary → fuzzy (rapidfuzz) → JSON cache → Claude. Price-based slab adjust for clothing/footwear. |
 | `core/entities/*` | Dataclasses: `BillItem`, `BillResult`, `ShopProfile`, `CustomerInfo`. |
-| `db/models.py` | SQLAlchemy models: `Shop`, `Bill` (with `pdf_data` LargeBinary, `is_return`, `is_igst`), `Registration`, `InvoiceSequence`, `PendingBillRecord`, `ProcessedMessage` (dedup), `ShopItemMaster`, `ConversationLog`, `ReportPDF`, `SessionRecord`. |
+| `db/models.py` | SQLAlchemy models: `Shop` (with `default_pricing` column — "inclusive"/"exclusive"), `Bill` (with `customer_phone`, `pdf_data` LargeBinary, `is_return`, `is_igst`), `Registration`, `InvoiceSequence`, `PendingBillRecord`, `ProcessedMessage` (dedup), `ShopItemMaster`, `ConversationLog`, `ReportPDF`, `SessionRecord`. |
 | `db/session.py` | Engine, `db_session()` context manager, `init_database`, `ensure_schema`, `reset_database`, thread-safe `generate_next_sequence`. |
 | `db/crud.py` | API key generation + validation. |
 | `db/item_master.py` | Per-shop item GST memory (`get_item_master`, `save_item_master`, `update_item_gst`, `get_top_items`). |
@@ -128,6 +128,8 @@ Root-level modules (`database.py`, `bill_generator.py`, `claude_parser.py`, `gst
 - **API key logging**: Truncated to first 8 chars to prevent plaintext credential exposure
 - **Webhook dedup**: INSERT-FIRST pattern via `try_claim_message(message_id)` — attempts INSERT, returns True (new) or False (duplicate via UNIQUE constraint). No check-then-insert race condition. Empty/missing message_id skips dedup with a warning log. Cleanup throttled to every 100 webhook calls (not every request). Uses raw session to keep expected IntegrityError at DEBUG level. Fails open on non-integrity DB errors.
 - **Schema validation at startup**: `ensure_schema()` runs after `init_database()`. Checks required tables and columns against `_REQUIRED_SCHEMA` dict in `db/session.py` using SQLAlchemy `inspect`. If `DEV_MODE=True` → auto-resets DB (drops all, recreates from models). If `DEV_MODE=False` (production) → logs warnings only, no destructive action. `reset_database()` also deletes the SQLite file for a clean slate. All schema logs use `[DB]` prefix.
+- **GST inclusive/exclusive pricing toggle**: During bill preview, shopkeepers can send `INCLUDE` (prices already contain GST) or `EXCLUDE` (prices are pre-GST, default). Mode is carried on `PendingBill.is_inclusive` and flows into `calculate_bill(is_inclusive=...)`, which backs out the taxable base via `price / (1 + rate/100)` per item. Last-used mode is persisted on `Shop.default_pricing` ("inclusive"/"exclusive") and auto-applied to the next bill. Preview and PDF both indicate which mode was used.
+- **Customer phone extraction**: `ai/sanitizer.extract_customer_phone()` pulls the first Indian mobile (`+91` optional, first digit 6–9, 10 digits, tolerates one space/hyphen) from the raw message, normalizes to a bare 10-digit string, and `strip_phone_from_name()` scrubs any phone that leaked into the customer name. The extracted number is stored on `PendingBill.customer_phone` during preview and persisted on `Bill.customer_phone` after confirmation. **Note:** `Bill.customer_phone` holds the *retail customer's* number (from the message body), not the shopkeeper's WhatsApp number — the shopkeeper's phone stays on `Registration.phone` / `ConversationLog.phone`.
 
 ---
 

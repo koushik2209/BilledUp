@@ -24,6 +24,10 @@
 
 9. **Return / Credit Note support**: `return_detector.py` detects return intent via 3-tier rule-based logic (keyword regex → rapidfuzz partial match → majority-negative prices). No external API calls. Credit notes use `CN-` prefixed invoice numbers with separate DB sequence (avoids gaps in regular invoices). `PendingBill.is_return` flag flows through preview, confirmation, PDF generation, and DB storage. `Bill.is_return` column in database. PDF shows "CREDIT NOTE" header. All amounts negated after `calculate_bill` (which always works with positive values internally). Preview and summary show "REFUND" label and negative amounts.
 
+10. **GST inclusive/exclusive pricing toggle**: Shopkeepers can toggle during the preview whether item prices already contain GST. Commands `INCLUDE` (prices are GST-inclusive) / `EXCLUDE` (prices are pre-GST, default) set `PendingBill.is_inclusive` and re-render the preview. `calculate_bill(is_inclusive=True)` backs out the taxable base per item via `base_unit = round(price / (1 + rate/100), 2)`, then `amount = qty × base_unit` and `gst_amt = qty × price − amount`. The last-used mode is persisted on `Shop.default_pricing` ("inclusive"/"exclusive") and auto-applied to the subsequent bill so shopkeepers don't have to re-toggle. The PDF renderer indicates which mode was used. This also added a new column to the `shops` table — `_REQUIRED_SCHEMA` in `db/session.py` was updated accordingly.
+
+11. **Customer phone extraction**: Retail customer phone numbers are now extracted from the raw message and persisted on the bill. `ai/sanitizer.extract_customer_phone()` uses `_PHONE_PATTERN = r"(?:\+91[\-\s]?)?[6-9]\d{4}[\-\s]?\d{5}"` — Indian mobiles only, first digit 6–9, optional `+91`, tolerates one space/hyphen after `+91` and in the middle. Returns a normalized bare 10-digit string, or `None`. `strip_phone_from_name()` scrubs any phone-like run that leaked into the customer name. The extracted value flows: parser/sanitizer → `PendingBill.customer_phone` → (after YES) `Bill.customer_phone` column. **Important:** `Bill.customer_phone` stores the *retail customer's* number from the message body — NOT the shopkeeper's WhatsApp number. The shopkeeper's phone remains only in `Registration.phone` and `ConversationLog.phone`. Backwards-compat for old pending bills is handled via `.setdefault("customer_phone", "")` in `_deserialize_pending()`.
+
 ---
 
 ## Important Assumptions
@@ -43,7 +47,9 @@
 
 ### Bill Calculation (`core/billing.py:calculate_bill`)
 - Accepts `shop_state_code` and `customer_state_code` params to determine tax type
-- For each item: `amount = qty × price`, `gst_amount = amount × rate / 100`
+- Also accepts `bill_of_supply: bool` and `is_inclusive: bool`
+- For each item (exclusive mode, default): `amount = qty × price`, `gst_amount = amount × rate / 100`
+- For each item (inclusive mode): `base_unit = price / (1 + rate/100)`, `amount = qty × base_unit`, `gst_amount = qty × price - amount`. Bill of Supply forces gst_rate to 0 and bypasses this branch.
   - **Intra-state**: `cgst = gst_amount / 2`, `sgst = gst_amount - cgst`, `igst = 0`
   - **Inter-state**: `cgst = 0`, `sgst = 0`, `igst = gst_amount`
 - `total = amount + gst_amount` (same regardless of tax type)

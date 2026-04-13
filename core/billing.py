@@ -71,6 +71,8 @@ def calculate_bill(
     customer_state_code: str = "",
     bill_of_supply: bool = False,
     is_inclusive: bool = False,
+    bill_discount_type: str = "none",
+    bill_discount_value: float = 0.0,
 ) -> BillResult:
     """Calculate bill totals.
 
@@ -78,6 +80,8 @@ def calculate_bill(
     Items still get HSN codes for record-keeping but gst_rate is forced to 0%.
     is_inclusive=True  → each item price is the GST-inclusive unit price;
     the taxable base is backed out as price / (1 + rate/100).
+    bill_discount_type/value → "none" | "percent" | "flat" | "override".
+    Item-level discounts live on each BillItem (item_discount_type/value).
     """
     if not items:
         raise ValueError("Cannot generate bill — no items provided")
@@ -149,6 +153,7 @@ def calculate_bill(
             name=name.title(), qty=qty, price=price,
             hsn=hsn, gst_rate=gst_rate, amount=amount,
             cgst=cgst, sgst=sgst, igst=igst, total=total,
+            raw_amount=round(qty * price, 2),
         ))
 
     subtotal    = round(subtotal, 2)
@@ -164,6 +169,8 @@ def calculate_bill(
         f"gst=Rs.{total_gst} | "
         f"total=Rs.{grand_total}"
     )
+    pricing_type = "inclusive" if is_inclusive else "exclusive"
+
     return BillResult(
         items=processed, subtotal=subtotal,
         total_cgst=total_cgst, total_sgst=total_sgst,
@@ -171,4 +178,10 @@ def calculate_bill(
         grand_total=grand_total,
         in_words=number_to_words(grand_total),
         is_igst=not intra,
+        pricing_type=pricing_type,
+        subtotal_before_bill_discount=subtotal,
+        bill_discount_type=bill_discount_type,
+        bill_discount_value=float(bill_discount_value or 0.0),
+        discount_total=0.0,
+        taxable_amount=subtotal,
     )

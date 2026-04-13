@@ -135,3 +135,104 @@ def test_calculate_bill_item_discount_inclusive():
     assert round(result.items[0].amount, 2) == 900.0
     assert round(result.items[0].total, 2) == 945.0
     assert round(result.grand_total, 2) == 945.0
+
+
+# ─────────────────────────────────────────────
+# Task 5 — bill-level flat/percent discount
+# ─────────────────────────────────────────────
+
+def test_calculate_bill_bill_flat_discount_single_rate():
+    items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="flat", bill_discount_value=100,
+    )
+    # subtotal 1000 → taxable 900 → gst 45 → grand 945
+    assert result.subtotal_before_bill_discount == 1000.0
+    assert result.taxable_amount == 900.0
+    assert result.discount_total == 100.0
+    assert round(result.grand_total, 2) == 945.0
+
+
+def test_calculate_bill_bill_percent_discount_mixed_rates():
+    items = [
+        BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5),
+        BillItem(name="soap", qty=1, price=1000, hsn="3401", gst_rate=18),
+    ]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="percent", bill_discount_value=10,
+    )
+    # Each item scaled to 900 → taxable 1800
+    # GST: 900*5% + 900*18% = 45 + 162 = 207
+    # grand = 1800 + 207 = 2007
+    assert result.subtotal_before_bill_discount == 2000.0
+    assert result.taxable_amount == 1800.0
+    assert round(result.discount_total, 2) == 200.0
+    assert round(result.grand_total, 2) == 2007.0
+
+
+def test_calculate_bill_bill_discount_stacked_with_item_discount():
+    """Item discount applies first, then bill discount on the post-item subtotal."""
+    items = [
+        BillItem(
+            name="tiles", qty=10, price=50, hsn="6907", gst_rate=18,
+            item_discount_type="percent", item_discount_value=10,
+        ),
+        BillItem(name="grout", qty=1, price=200, hsn="3214", gst_rate=18),
+    ]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="flat", bill_discount_value=50,
+    )
+    # tiles: 500 - 10% = 450
+    # grout: 200
+    # subtotal_before_bill_discount = 650
+    # bill flat 50 → scale = 600/650
+    # tiles scaled = 450 * 600/650 ≈ 415.38; grout scaled = 200 * 600/650 ≈ 184.62
+    # sum ≈ 600 (taxable); gst18 = 108; grand = 708
+    assert result.subtotal_before_bill_discount == 650.0
+    assert round(result.taxable_amount, 2) == 600.0
+    assert round(result.discount_total, 2) == 50.0
+    assert round(result.grand_total, 2) == 708.0
+
+
+def test_calculate_bill_bill_flat_discount_inclusive():
+    """Inclusive mode with bill-level flat discount."""
+    items = [BillItem(name="rice", qty=1, price=1050, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        is_inclusive=True,
+        bill_discount_type="flat", bill_discount_value=50,
+    )
+    # pre_bill_subtotal (inclusive) = 1050
+    # scale = 1000/1050 → scaled_line = 1000 (GST-inclusive lump)
+    # base = 1000/1.05 ≈ 952.38; gst ≈ 47.62; grand = 1000
+    assert result.subtotal_before_bill_discount == 1050.0
+    assert round(result.taxable_amount, 2) == 1000.0
+    assert round(result.discount_total, 2) == 50.0
+    assert round(result.grand_total, 2) == 1000.0
+
+
+def test_calculate_bill_bill_flat_discount_clamps_to_subtotal():
+    """Flat discount > subtotal clamps; taxable becomes 0."""
+    items = [BillItem(name="rice", qty=1, price=100, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="flat", bill_discount_value=500,
+    )
+    assert result.subtotal_before_bill_discount == 100.0
+    assert result.taxable_amount == 0.0
+    assert result.discount_total == 100.0
+    assert result.grand_total == 0.0
+
+
+def test_calculate_bill_bill_percent_discount_clamps_to_100():
+    """Percent > 100 clamps to 100 (treated as full discount)."""
+    items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="percent", bill_discount_value=150,
+    )
+    assert result.taxable_amount == 0.0
+    assert result.grand_total == 0.0

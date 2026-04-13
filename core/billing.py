@@ -93,8 +93,12 @@ def calculate_bill(
         log.info(f"Tax type: {'CGST+SGST (intra-state)' if intra else 'IGST (inter-state)'}")
 
     from gst_rates import get_gst_rate_smart, adjust_gst_for_price
-    processed = []
-    subtotal  = 0.0
+
+    # ─────────────────────────────────────────────
+    # Pass 1: resolve rates, apply item-level discounts, build `lines`
+    # ─────────────────────────────────────────────
+    lines = []
+    pre_bill_subtotal = 0.0
 
     for item in items:
         item.validate()
@@ -138,14 +142,65 @@ def calculate_bill(
             item_discount = round(min(max(0.0, i_disc_val), raw_amount), 2)
         else:
             item_discount = 0.0
-        discounted_line_total = round(raw_amount - item_discount, 2)
+        line_after_item_disc = round(raw_amount - item_discount, 2)
+        pre_bill_subtotal += line_after_item_disc
+
+        lines.append({
+            "name": name, "qty": qty, "price": price, "hsn": hsn,
+            "gst_rate": gst_rate, "raw_amount": raw_amount,
+            "i_disc_type": i_disc_type, "i_disc_val": i_disc_val,
+            "line_after_item_disc": line_after_item_disc,
+            "scaled_line": line_after_item_disc,  # overwritten in Pass 2
+        })
+
+    pre_bill_subtotal = round(pre_bill_subtotal, 2)
+
+    # ─────────────────────────────────────────────
+    # Bill-level discount: compute scale factor, apply to each line
+    # Scale-ratio approach preserves per-item GST rates.
+    # ─────────────────────────────────────────────
+    scale: float | None = 1.0
+    if bill_discount_type == "flat" and bill_discount_value and bill_discount_value > 0:
+        deduction = min(round(float(bill_discount_value), 2), pre_bill_subtotal)
+        scale = 0.0 if pre_bill_subtotal == 0 else (pre_bill_subtotal - deduction) / pre_bill_subtotal
+    elif bill_discount_type == "percent" and bill_discount_value and bill_discount_value > 0:
+        pct = max(0.0, min(100.0, float(bill_discount_value)))
+        scale = 1.0 - pct / 100.0
+    elif bill_discount_type == "override":
+        scale = None  # computed in Task 6
+    # else: scale stays 1.0 (no-op)
+
+    if scale is not None and scale != 1.0:
+        for L in lines:
+            L["scaled_line"] = round(L["line_after_item_disc"] * scale, 2)
+
+        # Rounding absorption (flat only): force scaled sum to equal
+        # pre_bill_subtotal − deduction exactly, so the discount row shows
+        # the exact amount the shopkeeper said.
+        if bill_discount_type == "flat":
+            deduction = min(round(float(bill_discount_value), 2), pre_bill_subtotal)
+            expected_sum = round(pre_bill_subtotal - deduction, 2)
+            actual_sum   = round(sum(L["scaled_line"] for L in lines), 2)
+            delta = round(expected_sum - actual_sum, 2)
+            if lines and abs(delta) <= 0.10 and delta != 0.0:
+                lines[-1]["scaled_line"] = round(lines[-1]["scaled_line"] + delta, 2)
+
+    # ─────────────────────────────────────────────
+    # Pass 2: compute per-item GST on scaled lines, assemble BillItems
+    # ─────────────────────────────────────────────
+    processed: list = []
+    subtotal  = 0.0
+
+    for L in lines:
+        base_lump = L["scaled_line"]
+        gst_rate  = L["gst_rate"]
 
         if is_inclusive and not bill_of_supply and gst_rate > 0:
-            # Discounted line total is GST-inclusive — back out the base.
-            amount  = round(discounted_line_total / (1 + gst_rate / 100), 2)
-            gst_amt = round(discounted_line_total - amount, 2)
+            # scaled_line is GST-inclusive → back out the base.
+            amount  = round(base_lump / (1 + gst_rate / 100), 2)
+            gst_amt = round(base_lump - amount, 2)
         else:
-            amount  = discounted_line_total
+            amount  = base_lump
             gst_amt = round(amount * gst_rate / 100, 2)
 
         if bill_of_supply:
@@ -159,16 +214,16 @@ def calculate_bill(
             sgst = 0.0
             igst = gst_amt
 
-        total    = round(amount + gst_amt, 2)
+        total     = round(amount + gst_amt, 2)
         subtotal += amount
 
         processed.append(BillItem(
-            name=name.title(), qty=qty, price=price,
-            hsn=hsn, gst_rate=gst_rate, amount=amount,
+            name=L["name"].title(), qty=L["qty"], price=L["price"],
+            hsn=L["hsn"], gst_rate=gst_rate, amount=amount,
             cgst=cgst, sgst=sgst, igst=igst, total=total,
-            raw_amount=raw_amount,
-            item_discount_type=i_disc_type,
-            item_discount_value=i_disc_val,
+            raw_amount=L["raw_amount"],
+            item_discount_type=L["i_disc_type"],
+            item_discount_value=L["i_disc_val"],
         ))
 
     subtotal    = round(subtotal, 2)
@@ -177,6 +232,13 @@ def calculate_bill(
     total_igst  = round(sum(i.igst for i in processed), 2)
     total_gst   = round(total_cgst + total_sgst + total_igst, 2)
     grand_total = round(subtotal + total_gst, 2)
+
+    # taxable_amount = post-bill-discount base-or-lump
+    #   • exclusive: sum of (pre-GST) bases = subtotal
+    #   • inclusive: sum of (GST-inclusive) scaled_lines
+    scaled_sum     = round(sum(L["scaled_line"] for L in lines), 2)
+    taxable_amount = scaled_sum if is_inclusive else subtotal
+    discount_total = round(pre_bill_subtotal - scaled_sum, 2)
 
     log.info(
         f"Bill - {len(processed)} items | "
@@ -194,9 +256,9 @@ def calculate_bill(
         in_words=number_to_words(grand_total),
         is_igst=not intra,
         pricing_type=pricing_type,
-        subtotal_before_bill_discount=subtotal,
+        subtotal_before_bill_discount=pre_bill_subtotal,
         bill_discount_type=bill_discount_type,
         bill_discount_value=float(bill_discount_value or 0.0),
-        discount_total=0.0,
-        taxable_amount=subtotal,
+        discount_total=discount_total,
+        taxable_amount=taxable_amount,
     )

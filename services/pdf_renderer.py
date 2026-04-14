@@ -127,6 +127,12 @@ def generate_pdf_bill(
             total_igst=-bill.total_igst, total_gst=-bill.total_gst,
             grand_total=-bill.grand_total, is_igst=bill.is_igst,
             in_words=bill.in_words,
+            pricing_type=bill.pricing_type,
+            subtotal_before_bill_discount=-bill.subtotal_before_bill_discount,
+            bill_discount_type=bill.bill_discount_type,
+            bill_discount_value=bill.bill_discount_value,
+            discount_total=-bill.discount_total,
+            taxable_amount=-bill.taxable_amount,
         )
 
     from io import BytesIO
@@ -317,16 +323,37 @@ def generate_pdf_bill(
     TM = 40*mm    # label
     TR = 30*mm    # value
 
+    # Show pre-discount subtotal + discount row when a bill-level discount applied
+    _has_bill_disc = (bill.bill_discount_type or "none") != "none" and bill.discount_total
+    _disc_rows = []
+    if _has_bill_disc:
+        _disc_rows.append(
+            ["", Paragraph("Subtotal",  s["total_label"]),
+             Paragraph(f"Rs.{bill.subtotal_before_bill_discount:.2f}", s["total_value"])]
+        )
+        _disc_rows.append(
+            ["", Paragraph("Discount",  s["total_label"]),
+             Paragraph(f"-Rs.{bill.discount_total:.2f}", s["total_value"])]
+        )
+        _disc_rows.append(
+            ["", Paragraph("Taxable",   s["total_label"]),
+             Paragraph(f"Rs.{bill.subtotal:.2f}", s["total_value"])]
+        )
+        _subtotal_row = []  # replaced by the three rows above
+    else:
+        _subtotal_row = [
+            ["", Paragraph("Subtotal", s["total_label"]),
+             Paragraph(f"Rs.{bill.subtotal:.2f}", s["total_value"])]
+        ]
+
     if shop.has_gstin and not bill.is_igst:
-        totals_data = [
-            ["", Paragraph("Subtotal",       s["total_label"]), Paragraph(f"Rs.{bill.subtotal:.2f}",   s["total_value"])],
+        totals_data = _disc_rows + _subtotal_row + [
             ["", Paragraph("CGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_cgst:.2f}", s["total_value"])],
             ["", Paragraph("SGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_sgst:.2f}", s["total_value"])],
             ["", Paragraph("Total GST",      s["total_label"]), Paragraph(f"Rs.{bill.total_gst:.2f}",  s["total_value"])],
         ]
     elif shop.has_gstin and bill.is_igst:
-        totals_data = [
-            ["", Paragraph("Subtotal",       s["total_label"]), Paragraph(f"Rs.{bill.subtotal:.2f}",   s["total_value"])],
+        totals_data = _disc_rows + _subtotal_row + [
             ["", Paragraph("IGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_igst:.2f}", s["total_value"])],
             ["", Paragraph("Total GST",      s["total_label"]), Paragraph(f"Rs.{bill.total_gst:.2f}",  s["total_value"])],
         ]

@@ -1035,6 +1035,40 @@ def test_preview_without_discount_unchanged():
     assert "590" in text
 
 
+def test_pdf_renderer_shows_discount_rows():
+    """Task 15: generate_pdf_bill with bill_discount_type='flat' renders a
+    discount section and produces a BillResult with correct fields."""
+    from services.pdf_renderer import generate_pdf_bill
+    from core.entities import BillItem
+    from bill_generator import ShopProfile, CustomerInfo
+
+    shop = ShopProfile(
+        shop_id="RAVI", name="Ravi Shop", address="Hyderabad",
+        gstin="36AAAAA0000A1Z5", phone="9876543210",
+        state="Telangana", state_code="36", upi="",
+    )
+    customer = CustomerInfo(
+        name="Kiran", phone="", state="Telangana", state_code="36",
+    )
+    items = [
+        BillItem(name="tiles", qty=10, price=50, hsn="6907", gst_rate=18,
+                 item_discount_type="percent", item_discount_value=10),
+    ]
+    pdf_bytes, br = generate_pdf_bill(
+        shop=shop, customer=customer, items=items,
+        invoice_number="TST-DISC-1",
+        is_inclusive=False,
+        bill_discount_type="flat", bill_discount_value=50,
+    )
+    assert isinstance(pdf_bytes, bytes) and len(pdf_bytes) > 1000
+    # 500 − 10% = 450; flat 50 → taxable 400; gst 72 → grand 472
+    assert round(br.taxable_amount, 2) == 400.0
+    assert round(br.grand_total, 2) == 472.0
+    assert br.bill_discount_type == "flat"
+    assert round(br.discount_total, 2) == 50.0  # bill-level only; item disc is folded into subtotal
+    assert round(br.subtotal_before_bill_discount, 2) == 450.0  # post item-discount
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

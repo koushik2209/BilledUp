@@ -159,6 +159,8 @@ def _compute_preview_totals(pending: PendingBill) -> dict:
             BillItem(
                 name=i["name"], qty=i["qty"], price=abs(i["price"]),
                 hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
+                item_discount_type=i.get("item_discount_type", "none") or "none",
+                item_discount_value=float(i.get("item_discount_value", 0) or 0),
             )
             for i in pending.items
         ]
@@ -169,17 +171,24 @@ def _compute_preview_totals(pending: PendingBill) -> dict:
             customer_state_code=pending.customer_state_code,
             bill_of_supply=pending.is_bill_of_supply,
             is_inclusive=pending.is_inclusive,
+            bill_discount_type=pending.bill_discount_type or "none",
+            bill_discount_value=float(pending.bill_discount_value or 0.0),
         )
         # For credit notes, negate all amounts
         sign = -1 if pending.is_return else 1
         return {
-            "subtotal":   br.subtotal * sign,
-            "total_cgst": br.total_cgst * sign,
-            "total_sgst": br.total_sgst * sign,
-            "total_igst": br.total_igst * sign,
-            "total_gst":  br.total_gst * sign,
-            "grand_total": br.grand_total * sign,
-            "is_igst":    br.is_igst,
+            "subtotal":       br.subtotal * sign,
+            "total_cgst":     br.total_cgst * sign,
+            "total_sgst":     br.total_sgst * sign,
+            "total_igst":     br.total_igst * sign,
+            "total_gst":      br.total_gst * sign,
+            "grand_total":    br.grand_total * sign,
+            "is_igst":        br.is_igst,
+            "subtotal_before_bill_discount": br.subtotal_before_bill_discount * sign,
+            "discount_total": br.discount_total * sign,
+            "taxable_amount": br.taxable_amount * sign,
+            "bill_discount_type":  br.bill_discount_type,
+            "bill_discount_value": br.bill_discount_value,
         }
     except Exception as e:
         log.warning(f"Preview totals failed: {e}")
@@ -198,6 +207,8 @@ def msg_preview(pending: PendingBill) -> str:
             "📋 *Bill Preview*\n",
             f"👤 Customer: *{pending.customer_name}*",
         ]
+    if getattr(pending, "needs_confirmation", False):
+        lines.insert(0, "⚠️ *Please double-check this bill before confirming.*")
     if pending.customer_phone:
         lines.append(f"📞 Phone: {pending.customer_phone}")
 
@@ -256,6 +267,9 @@ def msg_preview(pending: PendingBill) -> str:
         elif pending.is_inclusive:
             # Inclusive: show grand total first, then backed-out base + GST
             lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'} (incl GST): {sign}Rs.{abs(totals['grand_total']):.2f}*")
+            if totals.get("discount_total", 0):
+                lines.append(f"Subtotal:  {sign}Rs.{abs(totals['subtotal_before_bill_discount']):.2f}")
+                lines.append(f"Discount:  -Rs.{abs(totals['discount_total']):.2f}")
             lines.append(f"Base:      {sign}Rs.{abs(totals['subtotal']):.2f}")
             if totals["is_igst"]:
                 lines.append(f"IGST:      {sign}Rs.{abs(totals['total_igst']):.2f}")
@@ -264,7 +278,12 @@ def msg_preview(pending: PendingBill) -> str:
                 lines.append(f"SGST:      {sign}Rs.{abs(totals['total_sgst']):.2f}")
             lines.append(f"Total GST: {sign}Rs.{abs(totals['total_gst']):.2f}")
         else:
-            lines.append(f"Subtotal: {sign}Rs.{abs(totals['subtotal']):.2f}")
+            if totals.get("discount_total", 0):
+                lines.append(f"Subtotal:  {sign}Rs.{abs(totals['subtotal_before_bill_discount']):.2f}")
+                lines.append(f"Discount:  -Rs.{abs(totals['discount_total']):.2f}")
+                lines.append(f"Taxable:   {sign}Rs.{abs(totals['taxable_amount']):.2f}")
+            else:
+                lines.append(f"Subtotal: {sign}Rs.{abs(totals['subtotal']):.2f}")
             if totals["is_igst"]:
                 lines.append(f"IGST:     {sign}Rs.{abs(totals['total_igst']):.2f}")
             else:

@@ -975,6 +975,66 @@ def test_toggle_pricing_mode_persists_shop_default():
             s.delete(shop)
 
 
+def _make_pending_for_preview(**overrides):
+    from datetime import datetime as _dt
+    from services.pending import PendingBill
+    defaults = dict(
+        phone="+911", shop_id="RAVI", shop_name="S",
+        shop_state="Telangana", shop_state_code="36",
+        customer_name="Kiran", customer_phone="",
+        customer_state="Telangana", customer_state_code="36",
+        items=[{
+            "name": "tiles", "qty": 10, "price": 50,
+            "hsn": "6907", "gst_rate": 18, "gst_confidence": "high",
+            "item_discount_type": "percent", "item_discount_value": 10,
+        }],
+        confidence=0.95, warnings=[], raw_message="", created_at=_dt.utcnow(),
+        pricing_type="exclusive",
+        bill_discount_type="flat", bill_discount_value=50,
+    )
+    defaults.update(overrides)
+    return PendingBill(**defaults)
+
+
+def test_preview_shows_discount_breakdown():
+    """Task 14: preview text surfaces subtotal, discount, and taxable
+    base when bill-level discounts are present."""
+    from services.billing import msg_preview
+    pb = _make_pending_for_preview()
+    text = msg_preview(pb)
+    # Subtotal 500 − 10% item = 450 (raw subtotal_before_bill_discount)
+    # Flat 50 off → taxable 400
+    assert "Discount" in text or "discount" in text
+    assert "400" in text  # taxable/post-discount figure
+    assert "472" in text  # grand total
+
+
+def test_preview_shows_needs_confirmation_banner():
+    """Task 14: needs_confirmation pending bills get a visible banner."""
+    from services.billing import msg_preview
+    pb = _make_pending_for_preview(needs_confirmation=True)
+    text = msg_preview(pb)
+    assert "confirm" in text.lower()
+    # Banner should be something distinct — look for a warning glyph near the top
+    assert "⚠" in text or "❗" in text
+
+
+def test_preview_without_discount_unchanged():
+    """Regression: no bill discount → no discount row."""
+    from services.billing import msg_preview
+    pb = _make_pending_for_preview(
+        bill_discount_type="none", bill_discount_value=0.0,
+        items=[{
+            "name": "tiles", "qty": 10, "price": 50,
+            "hsn": "6907", "gst_rate": 18, "gst_confidence": "high",
+            "item_discount_type": "none", "item_discount_value": 0,
+        }],
+    )
+    text = msg_preview(pb)
+    # grand 590 (500 + 18% gst)
+    assert "590" in text
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

@@ -1069,6 +1069,42 @@ def test_pdf_renderer_shows_discount_rows():
     assert round(br.subtotal_before_bill_discount, 2) == 450.0  # post item-discount
 
 
+def test_end_to_end_inclusive_with_item_and_bill_discount():
+    """Task 16: full pipeline parser→pending→bill for a messy message
+    with inclusive pricing + bill-level flat discount."""
+    from services.billing import (
+        _build_pending_from_parser, _compute_bill_from_pending,
+    )
+    from db.models import Shop
+
+    shop = Shop(
+        shop_id="E2E", name="End To End", address="A",
+        gstin="36AABCU9603R1ZX", phone="9",
+        state="Telangana", state_code="36", default_pricing="exclusive",
+    )
+    parser_result = {
+        "customer_name": "Kiran", "customer_phone": None,
+        "items": [
+            {"name": "rice", "qty": 1, "price": 1050,
+             "item_discount_type": "none", "item_discount_value": 0,
+             "hsn": "1006", "gst_rate": 5},
+        ],
+        "bill_discount_type": "flat", "bill_discount_value": 50,
+        "pricing_type": "inclusive", "needs_confirmation": False,
+        "confidence": 0.95, "warnings": [], "notes": "", "error": None,
+    }
+    pb = _build_pending_from_parser(
+        phone="+911", shop=shop, parser_result=parser_result,
+        raw_message="rice 1050 including gst less 50",
+    )
+    result = _compute_bill_from_pending(pb)
+    assert pb.pricing_type == "inclusive"
+    # 1050 (inclusive) - 50 flat = 1000 final (inclusive)
+    assert round(result.taxable_amount, 2) == 1000.0
+    assert round(result.grand_total, 2) == 1000.0
+    _assert_bill_invariants(result, pre_subtotal_expected=1050.0)
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

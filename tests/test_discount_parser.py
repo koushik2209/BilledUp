@@ -424,6 +424,121 @@ def test_safeguard_over_discount_percent_clamps_and_invariants_hold():
     _assert_bill_invariants(result, pre_subtotal_expected=1000.0)
 
 
+# ─────────────────────────────────────────────
+# Task 6 — final amount override
+# ─────────────────────────────────────────────
+
+def test_calculate_bill_override_exclusive_mixed_rates():
+    """Override: scale scaled-line-total so grand_total == target exactly."""
+    items = [
+        BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5),
+        BillItem(name="soap", qty=1, price=1000, hsn="3401", gst_rate=18),
+    ]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="override", bill_discount_value=2000,
+    )
+    # Natural grand total = 1050 + 1180 = 2230. Target = 2000.
+    assert round(result.grand_total, 2) == 2000.0
+    assert result.bill_discount_type == "override"
+    assert result.bill_discount_value == 2000.0
+    assert result.subtotal_before_bill_discount == 2000.0  # pre-override
+    # discount_total is the rupees deducted from the pre-bill subtotal
+    # (scaled-line reduction), not the (natural - target) headline.
+    assert result.discount_total > 0
+    _assert_bill_invariants(result, pre_subtotal_expected=2000.0)
+
+
+def test_calculate_bill_override_inclusive():
+    """Override in inclusive mode: scaled lump sums to the target."""
+    items = [BillItem(name="rice", qty=1, price=1050, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        is_inclusive=True,
+        bill_discount_type="override", bill_discount_value=945,
+    )
+    assert round(result.grand_total, 2) == 945.0
+    assert result.taxable_amount == 945.0  # inclusive: lump == grand
+    _assert_bill_invariants(result, pre_subtotal_expected=1050.0)
+
+
+def test_calculate_bill_override_single_item():
+    """Override on a single item still hits the target exactly."""
+    items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="override", bill_discount_value=900,
+    )
+    # Natural grand = 1050. Target = 900.
+    assert round(result.grand_total, 2) == 900.0
+    _assert_bill_invariants(result, pre_subtotal_expected=1000.0)
+
+
+def test_calculate_bill_override_target_above_natural_is_noop():
+    """If target > natural, do not silently inflate — cap at natural."""
+    items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="override", bill_discount_value=9999,
+    )
+    # Natural grand = 1050. Target 9999 is bogus — keep natural.
+    assert result.grand_total == 1050.0
+    assert result.discount_total == 0.0
+    _assert_bill_invariants(result, pre_subtotal_expected=1000.0)
+
+
+def test_calculate_bill_override_zero_target_clamps_to_zero():
+    """Override to 0 makes the whole bill zero."""
+    items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="override", bill_discount_value=0,
+    )
+    assert result.grand_total == 0.0
+    assert result.taxable_amount == 0.0
+    _assert_bill_invariants(result, pre_subtotal_expected=1000.0)
+
+
+def test_calculate_bill_override_inter_state():
+    """Override under IGST path still hits the exact target."""
+    items = [
+        BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5),
+        BillItem(name="soap", qty=1, price=1000, hsn="3401", gst_rate=18),
+    ]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="29",
+        bill_discount_type="override", bill_discount_value=2000,
+    )
+    assert result.is_igst is True
+    assert round(result.grand_total, 2) == 2000.0
+    assert result.total_cgst == 0.0
+    assert result.total_sgst == 0.0
+    _assert_bill_invariants(result, pre_subtotal_expected=2000.0)
+
+
+def test_calculate_bill_override_preserves_rate_ratio():
+    """Items at different GST rates remain in the same value ratio after override."""
+    items = [
+        BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5),
+        BillItem(name="soap", qty=1, price=1000, hsn="3401", gst_rate=18),
+    ]
+    natural = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+    )
+    override = calculate_bill(
+        [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5),
+         BillItem(name="soap", qty=1, price=1000, hsn="3401", gst_rate=18)],
+        shop_state_code="36", customer_state_code="36",
+        bill_discount_type="override", bill_discount_value=2000,
+    )
+    # Natural: rice total 1050, soap total 1180, grand 2230.
+    # Override scales both lines by 2000/2230 uniformly. So the ratio
+    # of item.total between the two items should be preserved.
+    ratio_natural = natural.items[0].total / natural.items[1].total
+    ratio_override = override.items[0].total / override.items[1].total
+    assert abs(ratio_natural - ratio_override) <= 0.001
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

@@ -159,7 +159,10 @@ def calculate_bill(
     # Bill-level discount: compute scale factor, apply to each line
     # Scale-ratio approach preserves per-item GST rates.
     # ─────────────────────────────────────────────
-    scale: float | None = 1.0
+    scale: float = 1.0
+    natural_grand: float = 0.0          # populated for override mode
+    override_target: float = 0.0        # clamped target for override mode
+
     if bill_discount_type == "flat" and bill_discount_value and bill_discount_value > 0:
         deduction = min(round(float(bill_discount_value), 2), pre_bill_subtotal)
         scale = 0.0 if pre_bill_subtotal == 0 else (pre_bill_subtotal - deduction) / pre_bill_subtotal
@@ -167,10 +170,28 @@ def calculate_bill(
         pct = max(0.0, min(100.0, float(bill_discount_value)))
         scale = 1.0 - pct / 100.0
     elif bill_discount_type == "override":
-        scale = None  # computed in Task 6
+        # Compute the natural grand total from item-discounted lines so we
+        # know the ratio that brings every line to the shopkeeper's target.
+        for L in lines:
+            base = L["line_after_item_disc"]
+            r = L["gst_rate"]
+            if bill_of_supply or r == 0 or is_inclusive:
+                natural_grand += base
+            else:
+                natural_grand += round(base * (1 + r / 100), 2)
+        natural_grand = round(natural_grand, 2)
+        target = round(float(bill_discount_value or 0.0), 2)
+        # Clamp: target above natural is bogus (ignore); below zero is bogus.
+        override_target = max(0.0, min(target, natural_grand))
+        if natural_grand <= 0 or override_target == natural_grand:
+            scale = 1.0                 # no-op
+        elif override_target == 0:
+            scale = 0.0
+        else:
+            scale = override_target / natural_grand
     # else: scale stays 1.0 (no-op)
 
-    if scale is not None and scale != 1.0:
+    if scale != 1.0:
         for L in lines:
             L["scaled_line"] = round(L["line_after_item_disc"] * scale, 2)
 
@@ -232,6 +253,53 @@ def calculate_bill(
     total_igst  = round(sum(i.igst for i in processed), 2)
     total_gst   = round(total_cgst + total_sgst + total_igst, 2)
     grand_total = round(subtotal + total_gst, 2)
+
+    # ─────────────────────────────────────────────
+    # Override exactness: nudge the last processed item so grand_total
+    # equals the shopkeeper's target to the paisa. Per-line rounding at
+    # different GST rates can drift by ±₹0.01–₹0.05; anything larger than
+    # ₹0.50 is left alone so a real scale-ratio bug surfaces.
+    # ─────────────────────────────────────────────
+    if bill_discount_type == "override" and processed and scale != 1.0:
+        delta = round(override_target - grand_total, 2)
+        if abs(delta) <= 0.50 and delta != 0.0:
+            last = processed[-1]
+            r    = last.gst_rate
+            new_total = round(last.total + delta, 2)
+            if bill_of_supply or r == 0:
+                new_amount = new_total
+                new_gst    = 0.0
+            else:
+                new_amount = round(new_total / (1 + r / 100), 2)
+                new_gst    = round(new_total - new_amount, 2)
+            if bill_of_supply:
+                new_cgst = new_sgst = new_igst = 0.0
+            elif intra:
+                new_cgst = round(new_gst / 2, 2)
+                new_sgst = round(new_gst - new_cgst, 2)
+                new_igst = 0.0
+            else:
+                new_cgst = 0.0
+                new_sgst = 0.0
+                new_igst = new_gst
+            # Update aggregates relative to the last item's old contribution.
+            subtotal   = round(subtotal   - last.amount + new_amount, 2)
+            total_cgst = round(total_cgst - last.cgst   + new_cgst,   2)
+            total_sgst = round(total_sgst - last.sgst   + new_sgst,   2)
+            total_igst = round(total_igst - last.igst   + new_igst,   2)
+            total_gst  = round(total_cgst + total_sgst + total_igst,  2)
+            # Mutate the last BillItem in place.
+            last.amount = new_amount
+            last.cgst   = new_cgst
+            last.sgst   = new_sgst
+            last.igst   = new_igst
+            last.total  = new_total
+            grand_total = round(subtotal + total_gst, 2)
+            # Keep scaled_line in sync so discount-bookkeeping stays correct.
+            if is_inclusive:
+                lines[-1]["scaled_line"] = new_total
+            else:
+                lines[-1]["scaled_line"] = new_amount
 
     # taxable_amount = post-bill-discount base-or-lump
     #   • exclusive: sum of (pre-GST) bases = subtotal

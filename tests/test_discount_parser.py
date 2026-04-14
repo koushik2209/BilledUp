@@ -554,6 +554,29 @@ def test_calculate_bill_override_preserves_rate_ratio():
     assert abs(ratio_natural - ratio_override) <= 0.001
 
 
+def test_bill_model_has_discount_columns():
+    """Task 7: Bill ORM model exposes discount & pricing columns."""
+    from db.models import Bill
+    cols = {c.name for c in Bill.__table__.columns}
+    assert "bill_discount_type"      in cols
+    assert "bill_discount_value"     in cols
+    assert "subtotal_before_discount" in cols
+    assert "taxable_amount"          in cols
+    assert "pricing_type"            in cols
+
+
+def test_required_schema_lists_new_bill_columns():
+    """Task 7: _REQUIRED_SCHEMA references the new Bill columns
+    so startup validation catches drift."""
+    from db.session import _REQUIRED_SCHEMA
+    required = set(_REQUIRED_SCHEMA.get("bills", []))
+    for col in (
+        "bill_discount_type", "bill_discount_value",
+        "subtotal_before_discount", "taxable_amount", "pricing_type",
+    ):
+        assert col in required, f"missing {col} in _REQUIRED_SCHEMA['bills']"
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

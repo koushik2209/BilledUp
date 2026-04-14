@@ -474,8 +474,9 @@ def test_calculate_bill_override_single_item():
     _assert_bill_invariants(result, pre_subtotal_expected=1000.0)
 
 
-def test_calculate_bill_override_target_above_natural_is_noop():
-    """If target > natural, do not silently inflate — cap at natural."""
+def test_calculate_bill_override_target_above_natural_flags_confirmation():
+    """Target > natural: do NOT silently inflate. Keep natural totals
+    AND set needs_confirmation so the shopkeeper can re-check."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
     result = calculate_bill(
         items, shop_state_code="36", customer_state_code="36",
@@ -484,11 +485,13 @@ def test_calculate_bill_override_target_above_natural_is_noop():
     # Natural grand = 1050. Target 9999 is bogus — keep natural.
     assert result.grand_total == 1050.0
     assert result.discount_total == 0.0
+    assert result.needs_confirmation is True
     _assert_bill_invariants(result, pre_subtotal_expected=1000.0)
 
 
-def test_calculate_bill_override_zero_target_clamps_to_zero():
-    """Override to 0 makes the whole bill zero."""
+def test_calculate_bill_override_zero_target_flags_confirmation():
+    """Override to 0 is allowed AND flagged for confirmation —
+    a free bill is unusual enough to deserve a second look."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
     result = calculate_bill(
         items, shop_state_code="36", customer_state_code="36",
@@ -496,7 +499,19 @@ def test_calculate_bill_override_zero_target_clamps_to_zero():
     )
     assert result.grand_total == 0.0
     assert result.taxable_amount == 0.0
+    assert result.needs_confirmation is True
     _assert_bill_invariants(result, pre_subtotal_expected=1000.0)
+
+
+def test_calculate_bill_override_normal_no_confirmation_flag():
+    """A normal in-range override is NOT flagged for confirmation."""
+    items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="override", bill_discount_value=900,
+    )
+    assert result.grand_total == 900.0
+    assert result.needs_confirmation is False
 
 
 def test_calculate_bill_override_inter_state():

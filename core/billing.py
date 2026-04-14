@@ -162,6 +162,7 @@ def calculate_bill(
     scale: float = 1.0
     natural_grand: float = 0.0          # populated for override mode
     override_target: float = 0.0        # clamped target for override mode
+    needs_confirmation: bool = False    # flags suspicious overrides for review
 
     if bill_discount_type == "flat" and bill_discount_value and bill_discount_value > 0:
         deduction = min(round(float(bill_discount_value), 2), pre_bill_subtotal)
@@ -181,7 +182,12 @@ def calculate_bill(
                 natural_grand += round(base * (1 + r / 100), 2)
         natural_grand = round(natural_grand, 2)
         target = round(float(bill_discount_value or 0.0), 2)
-        # Clamp: target above natural is bogus (ignore); below zero is bogus.
+        # Clamp: target above natural is bogus; below zero is bogus.
+        # Both get flagged for shopkeeper review rather than silently accepted.
+        if target > natural_grand:
+            needs_confirmation = True   # inflation attempt — keep natural totals
+        if target <= 0:
+            needs_confirmation = True   # free bill — unusual, deserves a re-check
         override_target = max(0.0, min(target, natural_grand))
         if natural_grand <= 0 or override_target == natural_grand:
             scale = 1.0                 # no-op
@@ -329,4 +335,5 @@ def calculate_bill(
         bill_discount_value=float(bill_discount_value or 0.0),
         discount_total=discount_total,
         taxable_amount=taxable_amount,
+        needs_confirmation=needs_confirmation,
     )

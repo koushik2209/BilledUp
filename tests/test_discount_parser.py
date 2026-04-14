@@ -852,6 +852,75 @@ def test_parser_end_to_end_real_world_messy(monkeypatch, scenario, canned, expec
     _assert_bill_invariants(result)
 
 
+def test_build_pending_explicit_pricing_beats_shop_default():
+    """Task 11: explicit parser pricing_type wins over shop default."""
+    from services.billing import _build_pending_from_parser
+    from db.models import Shop
+    shop = Shop(shop_id="RAVI", name="X", address="Y", gstin="", phone="",
+                state="Telangana", state_code="36", default_pricing="exclusive")
+    parser_result = {
+        "customer_name": "A", "customer_phone": None,
+        "items": [{"name": "rice", "qty": 1, "price": 100,
+                   "item_discount_type": "none", "item_discount_value": 0}],
+        "bill_discount_type": "none", "bill_discount_value": 0.0,
+        "pricing_type": "inclusive", "needs_confirmation": False,
+        "confidence": 0.9, "warnings": [], "notes": "", "error": None,
+    }
+    pb = _build_pending_from_parser(
+        phone="+911", shop=shop, parser_result=parser_result,
+        raw_message="rice 100 including gst",
+    )
+    assert pb.pricing_type == "inclusive"
+    assert pb.is_inclusive is True
+
+
+def test_build_pending_falls_back_to_shop_default():
+    """Task 11: when parser is silent, shop default wins."""
+    from services.billing import _build_pending_from_parser
+    from db.models import Shop
+    shop = Shop(shop_id="RAVI", name="X", address="Y", gstin="", phone="",
+                state="Telangana", state_code="36", default_pricing="inclusive")
+    parser_result = {
+        "customer_name": "A", "customer_phone": None,
+        "items": [{"name": "rice", "qty": 1, "price": 100,
+                   "item_discount_type": "none", "item_discount_value": 0}],
+        "bill_discount_type": "none", "bill_discount_value": 0.0,
+        "pricing_type": None, "needs_confirmation": False,
+        "confidence": 0.9, "warnings": [], "notes": "", "error": None,
+    }
+    pb = _build_pending_from_parser(
+        phone="+911", shop=shop, parser_result=parser_result,
+        raw_message="rice 100",
+    )
+    assert pb.pricing_type == "inclusive"
+    assert pb.is_inclusive is True
+
+
+def test_build_pending_wires_discount_fields():
+    """Task 11: discount + needs_confirmation flow through the helper."""
+    from services.billing import _build_pending_from_parser
+    from db.models import Shop
+    shop = Shop(shop_id="RAVI", name="X", address="Y", gstin="", phone="",
+                state="TG", state_code="36", default_pricing="exclusive")
+    parser_result = {
+        "customer_name": "A", "customer_phone": None,
+        "items": [{"name": "rice", "qty": 1, "price": 100,
+                   "item_discount_type": "percent", "item_discount_value": 10}],
+        "bill_discount_type": "flat", "bill_discount_value": 20.0,
+        "pricing_type": "exclusive", "needs_confirmation": True,
+        "confidence": 0.9, "warnings": [], "notes": "", "error": None,
+    }
+    pb = _build_pending_from_parser(
+        phone="+911", shop=shop, parser_result=parser_result,
+        raw_message="rice 100 10% off, less 20",
+    )
+    assert pb.bill_discount_type == "flat"
+    assert pb.bill_discount_value == 20.0
+    assert pb.needs_confirmation is True
+    assert pb.items[0]["item_discount_type"] == "percent"
+    assert pb.items[0]["item_discount_value"] == 10.0
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

@@ -379,6 +379,58 @@ def _get_shop_default_inclusive(shop_id: str) -> bool:
     return False
 
 
+def _build_pending_from_parser(
+    phone: str, shop, parser_result: dict, raw_message: str,
+) -> PendingBill:
+    """Map a sanitized parser result to a PendingBill.
+
+    Pricing precedence:
+      1. Message-explicit pricing_type ("inclusive" | "exclusive") wins.
+      2. Otherwise fall back to the shop's default_pricing.
+      3. Fall back to "exclusive" if neither is valid.
+    Item/bill discount fields + needs_confirmation pass through verbatim.
+    """
+    pt = parser_result.get("pricing_type")
+    if pt in ("inclusive", "exclusive"):
+        pricing_type = pt
+    else:
+        pricing_type = (getattr(shop, "default_pricing", None) or "exclusive").lower()
+        if pricing_type not in ("inclusive", "exclusive"):
+            pricing_type = "exclusive"
+    is_inclusive = (pricing_type == "inclusive")
+
+    items = [
+        {
+            **i,
+            "item_discount_type":  i.get("item_discount_type", "none"),
+            "item_discount_value": float(i.get("item_discount_value", 0) or 0),
+        }
+        for i in parser_result.get("items", [])
+    ]
+
+    return PendingBill(
+        phone=phone,
+        shop_id=shop.shop_id, shop_name=shop.name,
+        shop_state=shop.state or "", shop_state_code=shop.state_code or "",
+        customer_name=parser_result.get("customer_name", "Customer"),
+        customer_phone=parser_result.get("customer_phone") or "",
+        customer_state=shop.state or "",
+        customer_state_code=shop.state_code or "",
+        items=items,
+        confidence=float(parser_result.get("confidence", 0.5)),
+        warnings=list(parser_result.get("warnings", [])),
+        raw_message=raw_message,
+        created_at=datetime.utcnow(),
+        is_return=False,
+        is_bill_of_supply=False,
+        is_inclusive=is_inclusive,
+        pricing_type=pricing_type,
+        bill_discount_type=parser_result.get("bill_discount_type", "none") or "none",
+        bill_discount_value=float(parser_result.get("bill_discount_value", 0) or 0),
+        needs_confirmation=bool(parser_result.get("needs_confirmation", False)),
+    )
+
+
 def _save_shop_default_pricing(shop_id: str, is_inclusive: bool):
     """Persist the last-used pricing mode as the shop's default for next bill."""
     pref = "inclusive" if is_inclusive else "exclusive"

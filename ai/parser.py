@@ -64,43 +64,148 @@ _rate_limiter = RateLimiter(RATE_LIMIT_CALLS, RATE_LIMIT_WINDOW)
 
 # ── System prompt ──
 SYSTEM_PROMPT = """You are a GST billing assistant for Indian retail shops.
-Extract bill information from a shopkeeper's WhatsApp message.
-Messages may be in English, Telugu, or Hindi — or a mix.
+Your job is to convert a shopkeeper's natural language message into a structured bill.
+Messages may be in English, Telugu, or Hindi — or a mix. Translate item names to simple English.
 
-Extract:
-1. customer_name: Who the bill is for (default "Customer" if not mentioned)
-2. items: List of products with name, quantity, price
+STRICT RULES (DO NOT VIOLATE):
 
-Rules:
-- Always translate item names to simple English
-- If quantity not mentioned, assume 1
-- Weight/unit descriptors must be kept as part of the item name, NOT treated as quantity. qty must remain 1 for these. Units to recognise: gm, g, kg, kgs, ml, l, ltr, litre, litres, gram, grams. Examples:
+--------------------------------------------------
+1. ITEM EXTRACTION
+--------------------------------------------------
+Extract all items with:
+  * name
+  * qty
+  * price   (unit price, BEFORE GST — never add GST yourself)
+
+Also extract "customer_name" (default "Customer" if not mentioned).
+If quantity is missing → assume 1.
+
+Weight/unit descriptors must be kept as part of the item NAME, NOT treated as quantity.
+qty must remain 1 for these. Units to recognise:
+  gm, g, kg, kgs, ml, l, ltr, litre, litres, gram, grams
+Examples:
   "gold 500gm 100000"  → name="gold 500gm",  qty=1, price=100000
   "oil 1kg 120"        → name="oil 1kg",      qty=1, price=120
-  "milk 500ml 25"      → name="milk 500ml",   qty=1, price=25
   "rice 2kg 80"        → name="rice 2kg",     qty=1, price=80
-  "silver 10gm 6000"   → name="silver 10gm",  qty=1, price=6000
-- Normal quantity words (x2, 2x, "2 shirts") are still treated as qty. Only numeric+unit combos are glued to the item name.
-- Prices given are BEFORE GST — never add GST yourself
-- Ignore greetings, please, thank you etc.
-- If a price seems like a phone number (10 digits), ignore it
-- Prices are in Indian Rupees only
-- Hyphens between item and price are valid separators e.g. "shirt-500" means shirt at Rs.500
+Normal quantity words (x2, 2x, "2 shirts") are still qty. Only numeric+unit combos glue to the name.
+If a "price" looks like a 10-digit phone number (starts 6/7/8/9, 10 digits), ignore it.
+Hyphens between item and price are valid separators, e.g. "shirt-500" → shirt at Rs.500.
 
-Reply ONLY in this exact JSON. No explanation, no markdown:
+--------------------------------------------------
+2. PRICING TYPE
+--------------------------------------------------
+* If message contains "including gst", "inclusive", "final price" → pricing_type = "inclusive"
+* Otherwise → pricing_type = "exclusive"
+
+--------------------------------------------------
+3. DISCOUNT HANDLING (HYBRID SYSTEM)
+--------------------------------------------------
+A) ITEM-LEVEL DISCOUNT (tied clearly to one item)
+   Examples:
+     "tiles 50 each 10% discount"
+     "tiles 500 less 50"
+     "tiles 50 make 45"
+   Rules:
+     - If the PRICE itself is changed (e.g., "50 make 45") → treat 45 as the NEW unit price
+       (not a discount). item_discount_type stays "none".
+     - Otherwise:
+         percent → item_discount_type = "percent"
+         flat    → item_discount_type = "flat"
+
+B) BILL-LEVEL DISCOUNT (global or written separately)
+   Examples:
+     "discount 500"
+     "less 500"
+     "give 10% discount"
+     "total less 500"
+     "extra 1000 off"
+   CRITICAL: If the discount appears at the END or as a separate statement → ALWAYS bill-level.
+
+C) FINAL AMOUNT OVERRIDE
+   Examples:
+     "make it 5000"
+     "final 4500"
+     "all together 10000 make 9000"
+   Rules:
+     - Treat the stated number as the final payable amount.
+     - Set bill_discount_type = "override" and bill_discount_value = that final amount.
+
+--------------------------------------------------
+4. DISCOUNT TYPE CLARITY (VERY IMPORTANT)
+--------------------------------------------------
+* A number WITHOUT "%" → flat rupees.
+    "52 discount"   → flat 52
+    "discount 500"  → flat 500
+* ONLY treat as percent when "%" OR "percent" OR "pct" is explicitly present.
+    "10%"        → percent
+    "10 percent" → percent
+
+--------------------------------------------------
+5. CALCULATION ORDER (STRICT — this is how the backend will compute)
+--------------------------------------------------
+Step 1: item_total         = qty × price
+Step 2: apply item-level discount → item_final_total
+Step 3: subtotal           = Σ item_final_total
+Step 4: apply bill-level discount:
+          flat     → taxable = subtotal − discount
+          percent  → taxable = subtotal × (1 − pct/100)
+          override → taxable derived from the final amount
+Step 5: GST:
+          exclusive → gst = taxable × rate/100 ; final = taxable + gst
+          inclusive → base = taxable / (1 + rate/100) ; gst = taxable − base ; final = taxable
+
+--------------------------------------------------
+6. GST RULES
+--------------------------------------------------
+* Default GST = 18%.
+* GST is ALWAYS applied AFTER all discounts. NEVER before.
+
+--------------------------------------------------
+7. AMBIGUITY HANDLING (CRITICAL)
+--------------------------------------------------
+If ANY confusion exists — unclear discount type, unclear item vs bill discount,
+conflicting numbers — pick the best interpretation AND set "needs_confirmation": true.
+Otherwise set "needs_confirmation": false.
+
+--------------------------------------------------
+8. OUTPUT FORMAT (STRICT JSON ONLY — no prose, no markdown)
+--------------------------------------------------
 {
   "customer_name": "string",
   "items": [
-    {"name": "string", "qty": number, "price": number}
+    {
+      "name": "string",
+      "qty": number,
+      "price": number,
+      "item_discount_type": "none | percent | flat",
+      "item_discount_value": number
+    }
   ],
-  "confidence": 0.95,
-  "notes": "any ambiguity or assumption made",
-  "error": null
+  "bill_discount_type":  "none | percent | flat | override",
+  "bill_discount_value": number,
+  "pricing_type":        "exclusive | inclusive",
+  "needs_confirmation":  false,
+  "confidence":          0.95,
+  "notes":               "any ambiguity or assumption made",
+  "error":               null
 }
 
-confidence: 0.0 to 1.0 — how confident you are in the extraction.
-Set error (string) if you cannot extract anything meaningful.
-Set notes if you made any assumptions."""
+confidence: 0.0–1.0.
+Set error (string) if nothing meaningful can be extracted.
+Set notes if you made any assumptions.
+
+--------------------------------------------------
+9. KEY INTERPRETATION RULES
+--------------------------------------------------
+* Discount near an item   → item-level
+* Discount at end / alone → bill-level
+* "make X" / "final X"    → override
+* "50 make 45"            → new unit price (NOT a discount)
+* Number without "%"      → flat ₹ discount
+* Percentage ONLY if "%" or "percent" / "pct" is explicit
+* Multiple discounts      → item-level first, then bill-level
+
+Accuracy is critical. Do not make mistakes."""
 
 
 # ── Main parse function ──
@@ -189,6 +294,7 @@ def parse_message(message: str) -> dict:
         fallback["warnings"] = warnings + fallback.get("warnings", [])
         fallback["warnings"].append(f"Claude API unavailable: {last_error or 'no response'}")
         fallback["parse_time_ms"] = _elapsed_ms(start_time)
+        _fill_discount_defaults(fallback)
         _apply_phone(fallback, parsed_phone)
         return fallback
 
@@ -202,6 +308,7 @@ def parse_message(message: str) -> dict:
         fallback["warnings"] = warnings + fallback.get("warnings", [])
         fallback["warnings"].append(f"Claude returned invalid JSON: {e}")
         fallback["parse_time_ms"] = _elapsed_ms(start_time)
+        _fill_discount_defaults(fallback)
         _apply_phone(fallback, parsed_phone)
         return fallback
 
@@ -231,6 +338,17 @@ def parse_message(message: str) -> dict:
     return result
 
 
+def _fill_discount_defaults(result: dict) -> None:
+    """Ensure regex-fallback results expose the new discount/pricing keys."""
+    result.setdefault("bill_discount_type", "none")
+    result.setdefault("bill_discount_value", 0.0)
+    result.setdefault("pricing_type", None)
+    result.setdefault("needs_confirmation", False)
+    for item in result.get("items", []):
+        item.setdefault("item_discount_type", "none")
+        item.setdefault("item_discount_value", 0.0)
+
+
 def _apply_phone(result: dict, phone: str | None) -> None:
     """Attach parsed customer_phone and strip any phone digits from the name."""
     result["customer_phone"] = phone
@@ -244,14 +362,18 @@ def _error_result(error: str, warnings: list | None = None,
                   parse_time_ms: int = 0) -> dict:
     log.error(f"Parse failed: {error}")
     return {
-        "customer_name":  "Customer",
-        "customer_phone": None,
-        "items":          [],
-        "confidence":     0.0,
-        "notes":          "",
-        "error":          error,
-        "warnings":       warnings or [],
-        "parse_time_ms":  parse_time_ms,
+        "customer_name":       "Customer",
+        "customer_phone":      None,
+        "items":               [],
+        "bill_discount_type":  "none",
+        "bill_discount_value": 0.0,
+        "pricing_type":        None,
+        "needs_confirmation":  False,
+        "confidence":          0.0,
+        "notes":               "",
+        "error":               error,
+        "warnings":            warnings or [],
+        "parse_time_ms":       parse_time_ms,
     }
 
 def _elapsed_ms(start: float) -> int:

@@ -1,5 +1,7 @@
 """Tests for discount and pricing features."""
 
+import pytest
+
 from core.entities import BillItem, BillResult
 
 
@@ -685,6 +687,169 @@ def test_sanitizer_defaults_missing_fields():
     assert result["bill_discount_value"] == 0.0
     assert result["items"][0]["item_discount_type"] == "none"
     assert result["items"][0]["item_discount_value"] == 0.0
+
+
+def test_parse_message_passes_through_discount_schema(monkeypatch):
+    """Task 10: parse_message round-trips the new parser schema fields
+    through the sanitizer when Claude returns them."""
+    import json as _json
+    from ai import parser as P
+
+    class _FakeBlock:
+        def __init__(self, text): self.text = text
+    class _FakeResp:
+        def __init__(self, text): self.content = [_FakeBlock(text)]
+
+    canned = {
+        "customer_name": "Kiran",
+        "items": [
+            {"name": "tiles", "qty": 10, "price": 50,
+             "item_discount_type": "percent", "item_discount_value": 10},
+        ],
+        "bill_discount_type": "flat", "bill_discount_value": 100,
+        "pricing_type": "exclusive", "needs_confirmation": False,
+        "confidence": 0.95, "notes": "", "error": None,
+    }
+
+    class _FakeMessages:
+        def create(self, **kw):
+            return _FakeResp(_json.dumps(canned))
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(P, "get_anthropic_client", lambda: _FakeClient())
+    monkeypatch.setattr(P, "TextBlock", _FakeBlock)
+
+    out = P.parse_message("tiles 10 at 50 each 10% discount, less 100")
+    assert out["bill_discount_type"] == "flat"
+    assert out["bill_discount_value"] == 100.0
+    assert out["pricing_type"] == "exclusive"
+    assert out["items"][0]["item_discount_type"] == "percent"
+    assert out["items"][0]["item_discount_value"] == 10.0
+
+
+def test_parse_message_error_result_has_discount_defaults():
+    """Error path still returns the new fields with safe defaults."""
+    from ai import parser as P
+    out = P._error_result("test err")
+    assert out["bill_discount_type"] == "none"
+    assert out["bill_discount_value"] == 0.0
+    assert out["pricing_type"] is None
+    assert out["needs_confirmation"] is False
+
+
+@pytest.mark.parametrize("scenario,canned,expected_total", [
+    # 1) Clean item + bill flat discount
+    (
+        "tiles 10 at 50 each, less 100",
+        {
+            "customer_name": "Kiran",
+            "items": [{"name": "tiles", "qty": 10, "price": 50,
+                       "item_discount_type": "none", "item_discount_value": 0}],
+            "bill_discount_type": "flat", "bill_discount_value": 100,
+            "pricing_type": "exclusive", "needs_confirmation": False,
+            "confidence": 0.95, "notes": "", "error": None,
+        },
+        # subtotal 500 − 100 = 400 × 1.18 = 472.00
+        472.00,
+    ),
+    # 2) Item-level percent + bill percent mixed
+    (
+        "shirt 500 10% off, total discount 5%",
+        {
+            "customer_name": "Customer",
+            "items": [{"name": "shirt", "qty": 1, "price": 500,
+                       "item_discount_type": "percent", "item_discount_value": 10}],
+            "bill_discount_type": "percent", "bill_discount_value": 5,
+            "pricing_type": "exclusive", "needs_confirmation": False,
+            "confidence": 0.9, "notes": "", "error": None,
+        },
+        # 500 − 50 = 450, 5% off = 427.5, + 5% GST (clothing) = 448.88
+        448.88,
+    ),
+    # 3) Override: "make it 9000"
+    (
+        "rice 5 bags at 1000 each make it 5000",
+        {
+            "customer_name": "Ramesh",
+            "items": [{"name": "rice", "qty": 5, "price": 1000,
+                       "item_discount_type": "none", "item_discount_value": 0}],
+            "bill_discount_type": "override", "bill_discount_value": 5000,
+            "pricing_type": "exclusive", "needs_confirmation": False,
+            "confidence": 0.9, "notes": "", "error": None,
+        },
+        5000.00,
+    ),
+    # 4) Inclusive pricing with flat bill discount
+    (
+        "soap 200 including gst less 20",
+        {
+            "customer_name": "Customer",
+            "items": [{"name": "soap", "qty": 1, "price": 200,
+                       "item_discount_type": "none", "item_discount_value": 0}],
+            "bill_discount_type": "flat", "bill_discount_value": 20,
+            "pricing_type": "inclusive", "needs_confirmation": False,
+            "confidence": 0.85, "notes": "", "error": None,
+        },
+        180.00,   # inclusive: final = taxable_after_discount
+    ),
+    # 5) "50 make 45" → new unit price, no item discount
+    (
+        "tiles 10 at 50 make 45",
+        {
+            "customer_name": "Customer",
+            "items": [{"name": "tiles", "qty": 10, "price": 45,
+                       "item_discount_type": "none", "item_discount_value": 0}],
+            "bill_discount_type": "none", "bill_discount_value": 0,
+            "pricing_type": "exclusive", "needs_confirmation": False,
+            "confidence": 0.9, "notes": "", "error": None,
+        },
+        531.00,  # 450 × 1.18
+    ),
+])
+def test_parser_end_to_end_real_world_messy(monkeypatch, scenario, canned, expected_total):
+    """Task 10 safeguard: realistic messages produce bills whose totals match
+    hand-computed expectations AND satisfy all bill invariants."""
+    import json as _json
+    from ai import parser as P
+    from core.entities import BillItem
+    from core.billing import calculate_bill
+
+    class _FakeBlock:
+        def __init__(self, text): self.text = text
+    class _FakeResp:
+        def __init__(self, text): self.content = [_FakeBlock(text)]
+    class _FakeMessages:
+        def create(self, **kw):
+            return _FakeResp(_json.dumps(canned))
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(P, "get_anthropic_client", lambda: _FakeClient())
+    monkeypatch.setattr(P, "TextBlock", _FakeBlock)
+
+    parsed = P.parse_message(scenario)
+    assert parsed.get("error") is None, f"parser error: {parsed.get('error')}"
+
+    items = [
+        BillItem(
+            name=it["name"], qty=it["qty"], price=it["price"],
+            item_discount_type=it.get("item_discount_type", "none"),
+            item_discount_value=it.get("item_discount_value", 0.0),
+        )
+        for it in parsed["items"]
+    ]
+    result = calculate_bill(
+        items,
+        shop_state_code="36", customer_state_code="36",
+        is_inclusive=(parsed["pricing_type"] == "inclusive"),
+        bill_discount_type=parsed["bill_discount_type"],
+        bill_discount_value=parsed["bill_discount_value"],
+    )
+    assert abs(result.grand_total - expected_total) <= 0.50, (
+        f"{scenario!r}: grand_total={result.grand_total} expected≈{expected_total}"
+    )
+    _assert_bill_invariants(result)
 
 
 def test_safeguard_negative_percent_is_noop():

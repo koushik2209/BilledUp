@@ -431,6 +431,36 @@ def _build_pending_from_parser(
     )
 
 
+def _compute_bill_from_pending(pb: PendingBill):
+    """Run calculate_bill over a confirmed PendingBill.
+
+    Builds BillItems from pending dicts (preserving pre-resolved
+    HSN/GST rates and per-item discounts) and forwards pricing /
+    bill-level discount fields into the pure billing engine.
+    """
+    from core.entities import BillItem as _BI
+    from core.billing import calculate_bill as _calc
+
+    bill_items = [
+        _BI(
+            name=i["name"], qty=i["qty"], price=abs(i["price"]),
+            hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
+            item_discount_type=i.get("item_discount_type", "none") or "none",
+            item_discount_value=float(i.get("item_discount_value", 0) or 0),
+        )
+        for i in pb.items
+    ]
+    return _calc(
+        bill_items,
+        shop_state_code=pb.shop_state_code,
+        customer_state_code=pb.customer_state_code,
+        bill_of_supply=pb.is_bill_of_supply,
+        is_inclusive=pb.is_inclusive,
+        bill_discount_type=pb.bill_discount_type or "none",
+        bill_discount_value=float(pb.bill_discount_value or 0.0),
+    )
+
+
 def _save_shop_default_pricing(shop_id: str, is_inclusive: bool):
     """Persist the last-used pricing mode as the shop's default for next bill."""
     pref = "inclusive" if is_inclusive else "exclusive"
@@ -844,13 +874,15 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
 
         invoice_number = generate_invoice_number(pending.shop_id, is_return=pending.is_return)
         pdf_data, bill_result = generate_pdf_bill(
-            shop           = shop,
-            customer       = customer,
-            items          = items,
-            invoice_number = invoice_number,
-            gst_client     = get_anthropic_client(),
-            is_return      = pending.is_return,
-            is_inclusive   = pending.is_inclusive,
+            shop                = shop,
+            customer            = customer,
+            items               = items,
+            invoice_number      = invoice_number,
+            gst_client          = get_anthropic_client(),
+            is_return           = pending.is_return,
+            is_inclusive        = pending.is_inclusive,
+            bill_discount_type  = pending.bill_discount_type or "none",
+            bill_discount_value = float(pending.bill_discount_value or 0.0),
         )
 
         # Save to database (retry once, warn user on failure)

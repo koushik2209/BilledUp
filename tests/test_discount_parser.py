@@ -921,6 +921,37 @@ def test_build_pending_wires_discount_fields():
     assert pb.items[0]["item_discount_value"] == 10.0
 
 
+def test_compute_bill_from_pending_applies_discounts():
+    """Task 12: confirming a pending bill runs item + bill discounts
+    through calculate_bill and returns a correct BillResult."""
+    from datetime import datetime as _dt
+    from services.pending import PendingBill
+    from services.billing import _compute_bill_from_pending
+
+    pb = PendingBill(
+        phone="+911", shop_id="RAVI", shop_name="X",
+        shop_state="Telangana", shop_state_code="36",
+        customer_name="Kiran", customer_phone="",
+        customer_state="Telangana", customer_state_code="36",
+        items=[{
+            "name": "tiles", "qty": 10, "price": 50,
+            "hsn": "6907", "gst_rate": 18,
+            "item_discount_type": "percent", "item_discount_value": 10,
+        }],
+        confidence=0.95, warnings=[], raw_message="",
+        created_at=_dt.utcnow(),
+        pricing_type="exclusive",
+        bill_discount_type="flat", bill_discount_value=50,
+    )
+    result = _compute_bill_from_pending(pb)
+    # raw 500 → item -10% → 450 → bill flat -50 → taxable 400
+    # gst 18% → 72 → grand 472
+    assert round(result.taxable_amount, 2) == 400.0
+    assert round(result.grand_total, 2) == 472.0
+    assert result.pricing_type == "exclusive"
+    assert result.bill_discount_type == "flat"
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

@@ -952,6 +952,29 @@ def test_compute_bill_from_pending_applies_discounts():
     assert result.bill_discount_type == "flat"
 
 
+def test_toggle_pricing_mode_persists_shop_default():
+    """Task 13: INCLUDE/EXCLUDE writes Shop.default_pricing immediately."""
+    from db.session import db_session
+    from db.models import Shop
+    from services.billing import _toggle_pricing_mode
+
+    with db_session() as s:
+        s.query(Shop).filter_by(shop_id="TST13").delete()
+        s.add(Shop(
+            shop_id="TST13", name="T", address="A", gstin="", phone="9",
+            state="Telangana", state_code="36", default_pricing="exclusive",
+        ))
+
+    _toggle_pricing_mode(shop_id="TST13", mode="inclusive")
+
+    with db_session() as s:
+        shop = s.query(Shop).filter_by(shop_id="TST13").first()
+        try:
+            assert shop.default_pricing == "inclusive"
+        finally:
+            s.delete(shop)
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

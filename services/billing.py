@@ -461,6 +461,20 @@ def _compute_bill_from_pending(pb: PendingBill):
     )
 
 
+def _toggle_pricing_mode(shop_id: str, mode: str) -> None:
+    """Persist Shop.default_pricing immediately so the next bill auto-uses
+    this mode, without waiting for the YES confirmation."""
+    if mode not in ("inclusive", "exclusive"):
+        return
+    try:
+        with db_session() as s:
+            shop = s.query(Shop).filter_by(shop_id=shop_id.upper()).first()
+            if shop and (shop.default_pricing or "") != mode:
+                shop.default_pricing = mode
+    except Exception as e:
+        log.warning(f"_toggle_pricing_mode failed for {shop_id}: {e}")
+
+
 def _save_shop_default_pricing(shop_id: str, is_inclusive: bool):
     """Persist the last-used pricing mode as the shop's default for next bill."""
     pref = "inclusive" if is_inclusive else "exclusive"
@@ -633,8 +647,10 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             return
         new_mode = msg_lower in ("include", "inclusive")
         pending.is_inclusive = new_mode
+        pending.pricing_type = "inclusive" if new_mode else "exclusive"
         pending.created_at = datetime.utcnow()  # refresh expiry
         store_pending(from_number, pending)
+        _toggle_pricing_mode(pending.shop_id, pending.pricing_type)
         header = (
             "✅ Prices marked as *GST inclusive*."
             if new_mode else

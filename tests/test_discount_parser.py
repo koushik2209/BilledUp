@@ -625,6 +625,68 @@ def test_pending_bill_backwards_compat_old_json():
     assert restored.needs_confirmation is False
 
 
+def test_sanitizer_normalizes_pricing_and_discount_fields():
+    """Task 9: validate_parsed_response accepts new schema fields
+    and coerces them to safe defaults."""
+    from ai.sanitizer import validate_parsed_response
+    raw = {
+        "customer_name": "Ravi",
+        "pricing_type": "INCLUSIVE",
+        "bill_discount_type": "flat",
+        "bill_discount_value": "50",
+        "items": [
+            {"name": "rice", "qty": 1, "price": 100,
+             "item_discount_type": "percent", "item_discount_value": "10"},
+            {"name": "soap", "qty": 2, "price": 50,
+             "item_discount_type": "flat", "item_discount_value": 5},
+        ],
+    }
+    result, issues = validate_parsed_response(raw)
+    assert result["pricing_type"] == "inclusive"
+    assert result["bill_discount_type"] == "flat"
+    assert result["bill_discount_value"] == 50.0
+    assert result["items"][0]["item_discount_type"] == "percent"
+    assert result["items"][0]["item_discount_value"] == 10.0
+    assert result["items"][1]["item_discount_type"] == "flat"
+    assert result["items"][1]["item_discount_value"] == 5.0
+
+
+def test_sanitizer_rejects_bad_discount_type_and_negative_values():
+    """Bad types coerce to 'none'; negative values coerce to 0."""
+    from ai.sanitizer import validate_parsed_response
+    raw = {
+        "customer_name": "Ravi",
+        "pricing_type": "bogus",
+        "bill_discount_type": "weird",
+        "bill_discount_value": -25,
+        "items": [
+            {"name": "rice", "qty": 1, "price": 100,
+             "item_discount_type": "junk", "item_discount_value": -5},
+        ],
+    }
+    result, _ = validate_parsed_response(raw)
+    assert result["pricing_type"] == "exclusive"       # default
+    assert result["bill_discount_type"] == "none"
+    assert result["bill_discount_value"] == 0.0
+    assert result["items"][0]["item_discount_type"] == "none"
+    assert result["items"][0]["item_discount_value"] == 0.0
+
+
+def test_sanitizer_defaults_missing_fields():
+    """Old-format parser output (no new fields) still validates fine."""
+    from ai.sanitizer import validate_parsed_response
+    raw = {
+        "customer_name": "Ravi",
+        "items": [{"name": "rice", "qty": 1, "price": 100}],
+    }
+    result, _ = validate_parsed_response(raw)
+    assert result["pricing_type"] == "exclusive"
+    assert result["bill_discount_type"] == "none"
+    assert result["bill_discount_value"] == 0.0
+    assert result["items"][0]["item_discount_type"] == "none"
+    assert result["items"][0]["item_discount_value"] == 0.0
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

@@ -83,6 +83,26 @@ def sanitize_message(message: str) -> tuple[str, list]:
 
 
 # ── Response validation ──
+_VALID_PRICING       = ("exclusive", "inclusive")
+_VALID_BILL_DISCOUNT = ("none", "percent", "flat", "override")
+_VALID_ITEM_DISCOUNT = ("none", "percent", "flat")
+
+
+def _coerce_float(raw, default=0.0) -> float:
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val >= 0 else default
+
+
+def _coerce_choice(raw, choices: tuple, default: str) -> str:
+    if raw is None:
+        return default
+    val = str(raw).strip().lower()
+    return val if val in choices else default
+
+
 def validate_parsed_response(result: dict) -> tuple[dict, list]:
     issues = []
     if "items" not in result:
@@ -91,6 +111,18 @@ def validate_parsed_response(result: dict) -> tuple[dict, list]:
     if not isinstance(result.get("items"), list):
         result["items"] = []
         issues.append("Items field is not a list")
+    # Bill-level discount & pricing fields
+    result["pricing_type"] = _coerce_choice(
+        result.get("pricing_type"), _VALID_PRICING, "exclusive"
+    )
+    result["bill_discount_type"] = _coerce_choice(
+        result.get("bill_discount_type"), _VALID_BILL_DISCOUNT, "none"
+    )
+    result["bill_discount_value"] = _coerce_float(
+        result.get("bill_discount_value"), 0.0
+    )
+    if result["bill_discount_type"] == "none":
+        result["bill_discount_value"] = 0.0
     customer = str(result.get("customer_name", "")).strip()
     if not customer or customer.lower() in ("null", "none", "unknown", ""):
         customer = "Customer"
@@ -142,10 +174,18 @@ def validate_parsed_response(result: dict) -> tuple[dict, list]:
         if 9000000000 <= price <= 9999999999:
             issues.append(f"Item '{name}' price looks like phone number — skipped")
             continue
+        item_disc_type = _coerce_choice(
+            item.get("item_discount_type"), _VALID_ITEM_DISCOUNT, "none"
+        )
+        item_disc_val = _coerce_float(item.get("item_discount_value"), 0.0)
+        if item_disc_type == "none":
+            item_disc_val = 0.0
         valid_items.append({
             "name":  name,
             "qty":   round(qty, 3),
             "price": round(price, 2),
+            "item_discount_type":  item_disc_type,
+            "item_discount_value": round(item_disc_val, 2),
         })
     if len(valid_items) > MAX_ITEMS_PER_BILL:
         valid_items = valid_items[:MAX_ITEMS_PER_BILL]

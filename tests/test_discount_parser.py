@@ -577,6 +577,54 @@ def test_required_schema_lists_new_bill_columns():
         assert col in required, f"missing {col} in _REQUIRED_SCHEMA['bills']"
 
 
+def test_pending_bill_roundtrips_discount_fields():
+    """Task 8: PendingBill carries pricing_type + bill-level discount +
+    needs_confirmation, and serialize/deserialize preserves them."""
+    from datetime import datetime as _dt
+    from services.pending import (
+        PendingBill, _serialize_pending, _deserialize_pending,
+    )
+    p = PendingBill(
+        phone="+91999", shop_id="s1", shop_name="S", shop_state="TG",
+        shop_state_code="36", customer_name="C", customer_state="TG",
+        customer_state_code="36", items=[{"name": "rice", "qty": 1, "price": 100}],
+        confidence=0.9, warnings=[], raw_message="bill rice 100 less 10",
+        created_at=_dt(2026, 4, 13, 12, 0, 0),
+        pricing_type="inclusive",
+        bill_discount_type="flat",
+        bill_discount_value=10.0,
+        needs_confirmation=True,
+    )
+    assert p.pricing_type == "inclusive"
+    assert p.bill_discount_type == "flat"
+    assert p.bill_discount_value == 10.0
+    assert p.needs_confirmation is True
+    restored = _deserialize_pending(_serialize_pending(p))
+    assert restored.pricing_type == "inclusive"
+    assert restored.bill_discount_type == "flat"
+    assert restored.bill_discount_value == 10.0
+    assert restored.needs_confirmation is True
+
+
+def test_pending_bill_backwards_compat_old_json():
+    """Old pending_bills rows without new fields still deserialize."""
+    import json as _json
+    from services.pending import _deserialize_pending
+    old = _json.dumps({
+        "phone": "+91999", "shop_id": "s1", "shop_name": "S",
+        "shop_state": "TG", "shop_state_code": "36",
+        "customer_name": "C", "customer_state": "TG",
+        "customer_state_code": "36",
+        "items": [], "confidence": 1.0, "warnings": [],
+        "raw_message": "x", "created_at": "2026-04-13T12:00:00",
+    })
+    restored = _deserialize_pending(old)
+    assert restored.pricing_type == "exclusive"
+    assert restored.bill_discount_type == "none"
+    assert restored.bill_discount_value == 0.0
+    assert restored.needs_confirmation is False
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

@@ -38,6 +38,10 @@ class PendingBill:
     is_bill_of_supply: bool = False
     is_inclusive: bool = False
     customer_phone: str = ""
+    pricing_type: str = "exclusive"           # "exclusive" | "inclusive"
+    bill_discount_type: str = "none"          # "none" | "percent" | "flat" | "override"
+    bill_discount_value: float = 0.0
+    needs_confirmation: bool = False
 
 
 def _serialize_pending(bill: PendingBill) -> str:
@@ -62,6 +66,10 @@ def _serialize_pending(bill: PendingBill) -> str:
         "is_bill_of_supply": bill.is_bill_of_supply,
         "is_inclusive": bill.is_inclusive,
         "customer_phone": bill.customer_phone,
+        "pricing_type": bill.pricing_type,
+        "bill_discount_type": bill.bill_discount_type,
+        "bill_discount_value": bill.bill_discount_value,
+        "needs_confirmation": bill.needs_confirmation,
     }
     return json.dumps(data)
 
@@ -74,6 +82,10 @@ def _deserialize_pending(json_str: str) -> PendingBill:
     data.setdefault("is_bill_of_supply", False)
     data.setdefault("is_inclusive", False)
     data.setdefault("customer_phone", "")
+    data.setdefault("pricing_type", "exclusive")
+    data.setdefault("bill_discount_type", "none")
+    data.setdefault("bill_discount_value", 0.0)
+    data.setdefault("needs_confirmation", False)
     return PendingBill(**data)
 
 

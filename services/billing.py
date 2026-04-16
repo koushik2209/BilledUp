@@ -274,6 +274,15 @@ def msg_preview(pending: PendingBill) -> str:
     totals = _compute_preview_totals(pending)
     if totals:
         sign = "-" if pending.is_return else ""
+        bdt = (pending.bill_discount_type or "none").lower()
+        bdv = float(pending.bill_discount_value or 0)
+        if bdt == "percent" and bdv > 0:
+            pre_bill = abs(totals.get("subtotal_before_bill_discount", 0))
+            disc_detail = f" ({bdv:g}% on Rs.{pre_bill:.2f})"
+        elif bdt == "flat" and bdv > 0:
+            disc_detail = " (flat)"
+        else:
+            disc_detail = ""
         lines.append(f"\n━━━━━━━━━━━━━━━━━")
         if pending.is_bill_of_supply:
             # Bill of Supply: total = subtotal, no GST breakdown
@@ -288,7 +297,7 @@ def msg_preview(pending: PendingBill) -> str:
                 if item_disc:
                     lines.append(f"Item Discount: -Rs.{abs(item_disc):.2f}")
                 if bill_disc:
-                    lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}")
+                    lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}{disc_detail}")
             lines.append(f"Base:      {sign}Rs.{abs(totals['subtotal']):.2f}")
             if totals["is_igst"]:
                 lines.append(f"IGST:      {sign}Rs.{abs(totals['total_igst']):.2f}")
@@ -304,7 +313,7 @@ def msg_preview(pending: PendingBill) -> str:
                 if item_disc:
                     lines.append(f"Item Discount: -Rs.{abs(item_disc):.2f}")
                 if bill_disc:
-                    lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}")
+                    lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}{disc_detail}")
                 lines.append(f"Taxable:   {sign}Rs.{abs(totals['taxable_amount']):.2f}")
             else:
                 lines.append(f"Subtotal: {sign}Rs.{abs(totals['subtotal']):.2f}")

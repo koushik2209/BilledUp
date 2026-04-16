@@ -1202,9 +1202,26 @@ def test_handle_new_bill_passes_discount_fields_to_pending():
     assert pb.bill_discount_value == 60
     text = msg_preview(pb)
     assert "Bill Discount" in text
+    assert "(flat)" in text
     assert "60.00" in text
     # taxable = 500 - 60 = 440, GST 5% = 22, grand = 462
     assert "462" in text
+
+
+def test_bill_discount_percent_shows_detail_in_preview():
+    """Bill-level percent discount shows '(X% on Rs.Y)' in preview."""
+    from services.billing import msg_preview
+    pb = _make_pending_for_preview(
+        bill_discount_type="percent", bill_discount_value=10,
+        items=[{
+            "name": "shirt", "qty": 1, "price": 1000,
+            "hsn": "6205", "gst_rate": 5, "gst_confidence": "high",
+            "item_discount_type": "none", "item_discount_value": 0,
+        }],
+    )
+    text = msg_preview(pb)
+    assert "(10% on Rs.1000.00)" in text
+    assert "Bill Discount: -Rs.100.00" in text
 
 
 def test_safeguard_negative_percent_is_noop():

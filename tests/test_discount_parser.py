@@ -1105,6 +1105,87 @@ def test_end_to_end_inclusive_with_item_and_bill_discount():
     _assert_bill_invariants(result, pre_subtotal_expected=1050.0)
 
 
+def test_preview_shows_item_discount_marker_on_line():
+    """Item-level discount must be visible on the item line (percent)."""
+    from services.billing import msg_preview
+    pb = _make_pending_for_preview(
+        bill_discount_type="none", bill_discount_value=0.0,
+        items=[{
+            "name": "tiles", "qty": 10, "price": 50,
+            "hsn": "6907", "gst_rate": 18, "gst_confidence": "high",
+            "item_discount_type": "percent", "item_discount_value": 10,
+        }],
+    )
+    text = msg_preview(pb)
+    assert "10% off" in text
+
+
+def test_preview_shows_item_discount_flat_marker_on_line():
+    """Item-level flat discount must be visible on the item line."""
+    from services.billing import msg_preview
+    pb = _make_pending_for_preview(
+        bill_discount_type="none", bill_discount_value=0.0,
+        items=[{
+            "name": "tiles", "qty": 10, "price": 50,
+            "hsn": "6907", "gst_rate": 18, "gst_confidence": "high",
+            "item_discount_type": "flat", "item_discount_value": 25,
+        }],
+    )
+    text = msg_preview(pb)
+    assert "-Rs.25" in text
+
+
+def test_preview_shows_item_discount_in_totals_block():
+    """Item-level discount alone (no bill-level) must surface an
+    'Item Discount:' row in the totals block, with Subtotal + Taxable."""
+    from services.billing import msg_preview
+    pb = _make_pending_for_preview(
+        bill_discount_type="none", bill_discount_value=0.0,
+        items=[{
+            "name": "tiles", "qty": 10, "price": 50,
+            "hsn": "6907", "gst_rate": 18, "gst_confidence": "high",
+            "item_discount_type": "percent", "item_discount_value": 10,
+        }],
+    )
+    text = msg_preview(pb)
+    assert "Subtotal:" in text
+    assert "Item Discount:" in text
+    assert "Taxable:" in text
+    # raw subtotal 500, item discount 50, taxable 450
+    assert "500.00" in text
+    assert "50.00" in text
+    assert "450.00" in text
+
+
+def test_preview_shows_stacked_item_and_bill_discount_breakdown():
+    """Stacked item-level + bill-level discount: both rows present."""
+    from services.billing import msg_preview
+    pb = _make_pending_for_preview()  # defaults: item 10%, bill flat 50
+    text = msg_preview(pb)
+    assert "Subtotal:" in text
+    assert "Item Discount:" in text
+    assert "Bill Discount:" in text
+    assert "Taxable:" in text
+    # raw=500, item-disc=50, bill-disc=50, taxable=400
+    assert "500.00" in text
+    assert "400.00" in text
+
+
+def test_compute_preview_totals_exposes_raw_and_item_discount():
+    """_compute_preview_totals must expose raw_subtotal and
+    item_discount_total so the preview UX can render both."""
+    from services.billing import _compute_preview_totals
+    pb = _make_pending_for_preview()
+    totals = _compute_preview_totals(pb)
+    assert "raw_subtotal" in totals
+    assert "item_discount_total" in totals
+    assert round(totals["raw_subtotal"], 2) == 500.0
+    assert round(totals["item_discount_total"], 2) == 50.0
+    # bill-level still applies on top of item-level
+    assert round(totals["discount_total"], 2) == 50.0
+    assert round(totals["taxable_amount"], 2) == 400.0
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

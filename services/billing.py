@@ -176,6 +176,8 @@ def _compute_preview_totals(pending: PendingBill) -> dict:
         )
         # For credit notes, negate all amounts
         sign = -1 if pending.is_return else 1
+        raw_subtotal = round(sum(i.raw_amount for i in br.items), 2)
+        item_discount_total = round(raw_subtotal - br.subtotal_before_bill_discount, 2)
         return {
             "subtotal":       br.subtotal * sign,
             "total_cgst":     br.total_cgst * sign,
@@ -184,6 +186,8 @@ def _compute_preview_totals(pending: PendingBill) -> dict:
             "total_gst":      br.total_gst * sign,
             "grand_total":    br.grand_total * sign,
             "is_igst":        br.is_igst,
+            "raw_subtotal":   raw_subtotal * sign,
+            "item_discount_total": item_discount_total * sign,
             "subtotal_before_bill_discount": br.subtotal_before_bill_discount * sign,
             "discount_total": br.discount_total * sign,
             "taxable_amount": br.taxable_amount * sign,
@@ -237,19 +241,29 @@ def msg_preview(pending: PendingBill) -> str:
         display_price = abs(item["price"])
         sign = "-" if pending.is_return else ""
 
+        # Item-level discount marker (percent or flat)
+        i_disc_type = (item.get("item_discount_type") or "none").lower()
+        i_disc_val  = float(item.get("item_discount_value") or 0.0)
+        if i_disc_type == "percent" and i_disc_val > 0:
+            disc_tag = f" (-{i_disc_val:g}% off)"
+        elif i_disc_type == "flat" and i_disc_val > 0:
+            disc_tag = f" (-Rs.{i_disc_val:g})"
+        else:
+            disc_tag = ""
+
         if pending.is_bill_of_supply:
             # No GST info shown for Bill of Supply
-            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}")
+            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}{disc_tag}")
         else:
             rate = item.get("gst_rate", 18)
             confidence = item.get("gst_confidence", item.get("gst_source", ""))
             if confidence == "low" or confidence == "default":
-                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST ⚠️)")
+                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}{disc_tag} ({rate}% GST ⚠️)")
                 has_low_confidence = True
             elif confidence == "medium" or confidence == "fuzzy":
-                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST ~)")
+                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}{disc_tag} ({rate}% GST ~)")
             else:
-                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST)")
+                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}{disc_tag} ({rate}% GST)")
 
     # ── Single grouped warning for low-confidence items ──
     if has_low_confidence:
@@ -267,9 +281,14 @@ def msg_preview(pending: PendingBill) -> str:
         elif pending.is_inclusive:
             # Inclusive: show grand total first, then backed-out base + GST
             lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'} (incl GST): {sign}Rs.{abs(totals['grand_total']):.2f}*")
-            if totals.get("discount_total", 0):
-                lines.append(f"Subtotal:  {sign}Rs.{abs(totals['subtotal_before_bill_discount']):.2f}")
-                lines.append(f"Discount:  -Rs.{abs(totals['discount_total']):.2f}")
+            item_disc = totals.get("item_discount_total", 0) or 0
+            bill_disc = totals.get("discount_total", 0) or 0
+            if item_disc or bill_disc:
+                lines.append(f"Subtotal:  {sign}Rs.{abs(totals['raw_subtotal']):.2f}")
+                if item_disc:
+                    lines.append(f"Item Discount: -Rs.{abs(item_disc):.2f}")
+                if bill_disc:
+                    lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}")
             lines.append(f"Base:      {sign}Rs.{abs(totals['subtotal']):.2f}")
             if totals["is_igst"]:
                 lines.append(f"IGST:      {sign}Rs.{abs(totals['total_igst']):.2f}")
@@ -278,9 +297,14 @@ def msg_preview(pending: PendingBill) -> str:
                 lines.append(f"SGST:      {sign}Rs.{abs(totals['total_sgst']):.2f}")
             lines.append(f"Total GST: {sign}Rs.{abs(totals['total_gst']):.2f}")
         else:
-            if totals.get("discount_total", 0):
-                lines.append(f"Subtotal:  {sign}Rs.{abs(totals['subtotal_before_bill_discount']):.2f}")
-                lines.append(f"Discount:  -Rs.{abs(totals['discount_total']):.2f}")
+            item_disc = totals.get("item_discount_total", 0) or 0
+            bill_disc = totals.get("discount_total", 0) or 0
+            if item_disc or bill_disc:
+                lines.append(f"Subtotal:  {sign}Rs.{abs(totals['raw_subtotal']):.2f}")
+                if item_disc:
+                    lines.append(f"Item Discount: -Rs.{abs(item_disc):.2f}")
+                if bill_disc:
+                    lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}")
                 lines.append(f"Taxable:   {sign}Rs.{abs(totals['taxable_amount']):.2f}")
             else:
                 lines.append(f"Subtotal: {sign}Rs.{abs(totals['subtotal']):.2f}")

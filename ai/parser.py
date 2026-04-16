@@ -119,7 +119,14 @@ B) BILL-LEVEL DISCOUNT (global or written separately)
      "give 10% discount"
      "total less 500"
      "extra 1000 off"
-   CRITICAL: If the discount appears at the END or as a separate statement → ALWAYS bill-level.
+     "blue lehenga 500 discount 60"         → bill-level flat 60
+     "shirt 500 pant 700 discount 100"      → bill-level flat 100
+     "rice 1000 10% discount"               → bill-level percent 10
+   CRITICAL: If the discount appears at the END of the message or as a separate
+   statement → ALWAYS bill-level, even when there is only one item and the
+   discount sits right after the price. Only classify as item-level when the
+   discount is clearly attached INSIDE an item phrase such as
+   "tiles 50 each 10% off" or "tiles 500 less 50 each".
 
 C) FINAL AMOUNT OVERRIDE
    Examples:

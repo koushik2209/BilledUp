@@ -565,8 +565,13 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             shop_state      = reg.get("state_name", "")
             shop_state_code = reg.get("state_code", "")
 
-        # Load shop's default pricing preference (inclusive vs exclusive)
-        default_inclusive = _get_shop_default_inclusive(shop_id)
+        # Determine pricing: parser-explicit wins, then shop default
+        parser_pt = parsed.get("pricing_type")
+        if parser_pt in ("inclusive", "exclusive"):
+            pricing_type = parser_pt
+        else:
+            default_inclusive = _get_shop_default_inclusive(shop_id)
+            pricing_type = "inclusive" if default_inclusive else "exclusive"
 
         # Determine invoice type from registration
         is_bos = reg.get("invoice_type") == "BILL_OF_SUPPLY"
@@ -619,8 +624,12 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             created_at         = datetime.utcnow(),
             is_return          = is_return,
             is_bill_of_supply  = is_bos,
-            is_inclusive       = default_inclusive and not is_bos,
+            is_inclusive       = pricing_type == "inclusive" and not is_bos,
             customer_phone     = parsed.get("customer_phone") or "",
+            pricing_type       = pricing_type if not is_bos else "exclusive",
+            bill_discount_type = parsed.get("bill_discount_type", "none") or "none",
+            bill_discount_value= float(parsed.get("bill_discount_value", 0) or 0),
+            needs_confirmation = bool(parsed.get("needs_confirmation", False)),
         )
 
         store_pending(from_number, pending)
@@ -825,6 +834,13 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             pending.raw_message = message
             pending.is_return   = is_return
             pending.created_at  = datetime.utcnow()
+            pending.bill_discount_type  = parsed.get("bill_discount_type", "none") or "none"
+            pending.bill_discount_value = float(parsed.get("bill_discount_value", 0) or 0)
+            pending.needs_confirmation  = bool(parsed.get("needs_confirmation", False))
+            re_pt = parsed.get("pricing_type")
+            if re_pt in ("inclusive", "exclusive"):
+                pending.pricing_type = re_pt
+                pending.is_inclusive = re_pt == "inclusive"
             store_pending(from_number, pending)
             send(from_number, msg_preview(pending))
             return

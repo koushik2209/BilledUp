@@ -1186,6 +1186,27 @@ def test_compute_preview_totals_exposes_raw_and_item_discount():
     assert round(totals["taxable_amount"], 2) == 400.0
 
 
+def test_handle_new_bill_passes_discount_fields_to_pending():
+    """Regression: _handle_new_bill must pass parser discount fields
+    to PendingBill so they reach calculate_bill at confirmation."""
+    from services.billing import msg_preview
+    pb = _make_pending_for_preview(
+        bill_discount_type="flat", bill_discount_value=60,
+        items=[{
+            "name": "blue lehenga", "qty": 1, "price": 500,
+            "hsn": "6204", "gst_rate": 5, "gst_confidence": "high",
+            "item_discount_type": "none", "item_discount_value": 0,
+        }],
+    )
+    assert pb.bill_discount_type == "flat"
+    assert pb.bill_discount_value == 60
+    text = msg_preview(pb)
+    assert "Bill Discount" in text
+    assert "60.00" in text
+    # taxable = 500 - 60 = 440, GST 5% = 22, grand = 462
+    assert "462" in text
+
+
 def test_safeguard_negative_percent_is_noop():
     """Negative percent is rejected (treated as no discount)."""
     items = [BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5)]

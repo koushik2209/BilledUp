@@ -281,11 +281,20 @@ def msg_preview(pending: PendingBill) -> str:
             disc_detail = f" ({bdv:g}% on Rs.{pre_bill:.2f})"
         elif bdt == "flat" and bdv > 0:
             disc_detail = " (flat)"
+        elif bdt == "override" and bdv > 0:
+            disc_detail = f" (final Rs.{bdv:.2f})"
         else:
             disc_detail = ""
         lines.append(f"\n━━━━━━━━━━━━━━━━━")
         if pending.is_bill_of_supply:
-            # Bill of Supply: total = subtotal, no GST breakdown
+            item_disc = totals.get("item_discount_total", 0) or 0
+            bill_disc = totals.get("discount_total", 0) or 0
+            if item_disc or bill_disc:
+                lines.append(f"Subtotal:  {sign}Rs.{abs(totals['raw_subtotal']):.2f}")
+                if item_disc:
+                    lines.append(f"Item Discount: -Rs.{abs(item_disc):.2f}")
+                if bill_disc:
+                    lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}{disc_detail}")
             lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'}: {sign}Rs.{abs(totals['subtotal']):.2f}*")
         elif pending.is_inclusive:
             # Inclusive: show grand total first, then backed-out base + GST
@@ -952,6 +961,8 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             BillItem(
                 name=i["name"], qty=i["qty"], price=abs(i["price"]),
                 hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
+                item_discount_type=i.get("item_discount_type", "none") or "none",
+                item_discount_value=float(i.get("item_discount_value", 0) or 0),
             )
             for i in pending.items
         ]

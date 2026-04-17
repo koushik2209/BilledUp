@@ -739,18 +739,18 @@ def test_parse_message_error_result_has_discount_defaults():
 
 
 @pytest.mark.parametrize("scenario,canned,expected_total", [
-    # 1) Clean item + bill flat discount
+    # 1) Item-level flat discount (adjacent "less 100" → item-level on tiles)
     (
         "tiles 10 at 50 each, less 100",
         {
             "customer_name": "Kiran",
             "items": [{"name": "tiles", "qty": 10, "price": 50,
-                       "item_discount_type": "none", "item_discount_value": 0}],
-            "bill_discount_type": "flat", "bill_discount_value": 100,
+                       "item_discount_type": "flat", "item_discount_value": 100}],
+            "bill_discount_type": "none", "bill_discount_value": 0,
             "pricing_type": "exclusive", "needs_confirmation": False,
             "confidence": 0.95, "notes": "", "error": None,
         },
-        # subtotal 500 − 100 = 400 × 1.18 = 472.00
+        # raw 500 − flat 100 = 400 × 1.18 = 472.00
         472.00,
     ),
     # 2) Item-level percent + bill percent mixed
@@ -1236,3 +1236,137 @@ def test_safeguard_negative_percent_is_noop():
     assert result.taxable_amount == 1000.0
     assert result.grand_total == 1050.0
     _assert_bill_invariants(result, pre_subtotal_expected=1000.0)
+
+
+# ─────────────────────────────────────────────
+# Item-level discount: NO redistribution to other items
+# ─────────────────────────────────────────────
+
+def test_item_percent_discount_no_redistribution():
+    """Shirt 500 with 5% discount + Pant 600 → only Shirt is discounted.
+    This is the exact scenario from the bug report."""
+    items = [
+        BillItem(name="shirt", qty=1, price=500, hsn="6205", gst_rate=5,
+                 item_discount_type="percent", item_discount_value=5),
+        BillItem(name="pant", qty=1, price=600, hsn="6204", gst_rate=5),
+    ]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+    )
+    # Shirt: 500 - 5% = 475 (discounted)
+    assert result.items[0].amount == 475.0
+    assert result.items[0].raw_amount == 500.0
+    assert result.items[0].item_discount_type == "percent"
+    # Pant: 600 — UNTOUCHED, no redistribution
+    assert result.items[1].amount == 600.0
+    assert result.items[1].raw_amount == 600.0
+    assert result.items[1].item_discount_type == "none"
+    # Totals: 475 + 600 = 1075, GST 5% = 53.75, grand = 1128.75
+    assert result.subtotal == 1075.0
+    assert round(result.grand_total, 2) == 1128.75
+    assert result.bill_discount_type == "none"
+    assert result.discount_total == 0.0
+    _assert_bill_invariants(result)
+
+
+def test_item_flat_discount_no_redistribution():
+    """Flat discount on one item does NOT affect other items."""
+    items = [
+        BillItem(name="rice", qty=1, price=1000, hsn="1006", gst_rate=5,
+                 item_discount_type="flat", item_discount_value=100),
+        BillItem(name="soap", qty=2, price=50, hsn="3401", gst_rate=18),
+    ]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+    )
+    # Rice: 1000 - 100 = 900 (discounted)
+    assert result.items[0].amount == 900.0
+    # Soap: 2*50 = 100 — UNTOUCHED
+    assert result.items[1].amount == 100.0
+    assert result.items[1].raw_amount == 100.0
+    # Totals: 900 + 100 = 1000
+    assert result.subtotal == 1000.0
+    # GST: 900*5% + 100*18% = 45 + 18 = 63
+    assert round(result.total_gst, 2) == 63.0
+    assert round(result.grand_total, 2) == 1063.0
+    _assert_bill_invariants(result)
+
+
+def test_multiple_item_discounts_stay_independent():
+    """Two items each with their own discount — no cross-contamination."""
+    items = [
+        BillItem(name="shirt", qty=1, price=500, hsn="6205", gst_rate=5,
+                 item_discount_type="percent", item_discount_value=10),
+        BillItem(name="tiles", qty=10, price=50, hsn="6907", gst_rate=18,
+                 item_discount_type="flat", item_discount_value=50),
+        BillItem(name="soap", qty=1, price=200, hsn="3401", gst_rate=18),
+    ]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+    )
+    # Shirt: 500 - 10% = 450
+    assert result.items[0].amount == 450.0
+    # Tiles: 500 - 50 flat = 450
+    assert result.items[1].amount == 450.0
+    # Soap: 200 — UNTOUCHED
+    assert result.items[2].amount == 200.0
+    assert result.items[2].raw_amount == 200.0
+    # No bill-level discount
+    assert result.bill_discount_type == "none"
+    assert result.discount_total == 0.0
+    _assert_bill_invariants(result)
+
+
+def test_item_discount_with_explicit_bill_discount_coexist():
+    """Item discount + explicit bill-level discount both apply correctly.
+    Item discount first (per-item), then bill discount via scale-ratio."""
+    items = [
+        BillItem(name="shirt", qty=1, price=500, hsn="6205", gst_rate=5,
+                 item_discount_type="percent", item_discount_value=10),
+        BillItem(name="pant", qty=1, price=600, hsn="6204", gst_rate=5),
+    ]
+    result = calculate_bill(
+        items, shop_state_code="36", customer_state_code="36",
+        bill_discount_type="flat", bill_discount_value=100,
+    )
+    # Step 1 - item discount: shirt 500-10%=450, pant 600
+    # pre_bill_subtotal = 1050
+    assert result.subtotal_before_bill_discount == 1050.0
+    # Step 2 - bill flat 100: scale = 950/1050
+    # Shirt: 450 * 950/1050 ≈ 407.14; Pant: 600 * 950/1050 ≈ 542.86
+    # Both items are scaled (bill-level redistributes)
+    assert result.taxable_amount == 950.0
+    assert result.discount_total == 100.0
+    # GST 5% on 950 = 47.5; grand = 997.5
+    assert round(result.grand_total, 2) == 997.5
+    _assert_bill_invariants(result)
+
+
+def test_preview_matches_final_bill_with_item_discount():
+    """Preview totals must EXACTLY match what calculate_bill produces
+    for items with item-level discounts and no bill-level discount."""
+    from services.billing import _compute_preview_totals
+    pb = _make_pending_for_preview(
+        bill_discount_type="none", bill_discount_value=0.0,
+        items=[
+            {"name": "shirt", "qty": 1, "price": 500,
+             "hsn": "6205", "gst_rate": 5, "gst_confidence": "high",
+             "item_discount_type": "percent", "item_discount_value": 10},
+            {"name": "pant", "qty": 1, "price": 600,
+             "hsn": "6204", "gst_rate": 5, "gst_confidence": "high",
+             "item_discount_type": "none", "item_discount_value": 0},
+        ],
+    )
+    totals = _compute_preview_totals(pb)
+    # Direct calculate_bill for comparison
+    bill_items = [
+        BillItem(name="shirt", qty=1, price=500, hsn="6205", gst_rate=5,
+                 item_discount_type="percent", item_discount_value=10),
+        BillItem(name="pant", qty=1, price=600, hsn="6204", gst_rate=5),
+    ]
+    br = calculate_bill(bill_items, shop_state_code="36", customer_state_code="36")
+    # Preview must match final bill exactly
+    assert totals["grand_total"] == br.grand_total
+    assert totals["subtotal"] == br.subtotal
+    assert totals["total_gst"] == br.total_gst
+    assert totals["taxable_amount"] == br.taxable_amount

@@ -290,6 +290,10 @@ def msg_preview(pending: PendingBill) -> str:
             disc_detail = f" (final Rs.{bdv:.2f})"
         else:
             disc_detail = ""
+        # UX note: proportional distribution for multi-item bill-level discount
+        _bill_disc_note = ""
+        if bdt in ("percent", "flat") and bdv > 0 and len(pending.items) > 1:
+            _bill_disc_note = "_Discount applied proportionally across all items_"
         lines.append(f"\n━━━━━━━━━━━━━━━━━")
         if pending.is_bill_of_supply:
             item_disc = totals.get("item_discount_total", 0) or 0
@@ -300,6 +304,8 @@ def msg_preview(pending: PendingBill) -> str:
                     lines.append(f"Item Discount: -Rs.{abs(item_disc):.2f}")
                 if bill_disc:
                     lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}{disc_detail}")
+                    if _bill_disc_note:
+                        lines.append(_bill_disc_note)
             lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'}: {sign}Rs.{abs(totals['subtotal']):.2f}*")
         elif pending.is_inclusive:
             # Inclusive: show grand total first, then backed-out base + GST
@@ -312,6 +318,8 @@ def msg_preview(pending: PendingBill) -> str:
                     lines.append(f"Item Discount: -Rs.{abs(item_disc):.2f}")
                 if bill_disc:
                     lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}{disc_detail}")
+                    if _bill_disc_note:
+                        lines.append(_bill_disc_note)
             lines.append(f"Base:      {sign}Rs.{abs(totals['subtotal']):.2f}")
             if totals["is_igst"]:
                 lines.append(f"IGST:      {sign}Rs.{abs(totals['total_igst']):.2f}")
@@ -328,6 +336,8 @@ def msg_preview(pending: PendingBill) -> str:
                     lines.append(f"Item Discount: -Rs.{abs(item_disc):.2f}")
                 if bill_disc:
                     lines.append(f"Bill Discount: -Rs.{abs(bill_disc):.2f}{disc_detail}")
+                    if _bill_disc_note:
+                        lines.append(_bill_disc_note)
                 lines.append(f"Taxable:   {sign}Rs.{abs(totals['taxable_amount']):.2f}")
             else:
                 lines.append(f"Subtotal: {sign}Rs.{abs(totals['subtotal']):.2f}")

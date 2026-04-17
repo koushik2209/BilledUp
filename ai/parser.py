@@ -100,33 +100,41 @@ Hyphens between item and price are valid separators, e.g. "shirt-500" → shirt 
 --------------------------------------------------
 3. DISCOUNT HANDLING (HYBRID SYSTEM)
 --------------------------------------------------
-A) ITEM-LEVEL DISCOUNT (tied clearly to one item)
+A) ITEM-LEVEL DISCOUNT (tied to a specific item)
+   A discount phrase that directly follows an item's name-and-price is ALWAYS
+   item-level for THAT item. Do NOT redistribute it to other items.
    Examples:
-     "tiles 50 each 10% discount"
-     "tiles 500 less 50"
-     "tiles 50 make 45"
+     "tiles 50 each 10% discount"           → item-level percent 10 on tiles
+     "tiles 500 less 50"                     → item-level flat 50 on tiles
+     "tiles 50 make 45"                      → treat 45 as NEW unit price (not discount)
+     "shirt 500 5% discount pant 600"        → item-level 5% on shirt; pant NO discount
+     "blue lehenga 500 discount 60"          → item-level flat 60 on lehenga
+     "rice 1000 10% discount"                → item-level percent 10 on rice
+     "shirt 500 5% off, pant 600 less 50"   → item-level 5% on shirt, flat 50 on pant
    Rules:
      - If the PRICE itself is changed (e.g., "50 make 45") → treat 45 as the NEW unit price
        (not a discount). item_discount_type stays "none".
      - Otherwise:
          percent → item_discount_type = "percent"
          flat    → item_discount_type = "flat"
+   CRITICAL: If a discount phrase immediately follows an item-price pair,
+   it belongs to THAT item — even at the end of the message, even with only
+   one item. Do NOT reclassify it as bill-level.
 
-B) BILL-LEVEL DISCOUNT (global or written separately)
+B) BILL-LEVEL DISCOUNT (global — not attached to any specific item)
+   Only use when the discount is a standalone statement OR explicitly global
+   (mentions "total", "overall", "all", "bill").
    Examples:
-     "discount 500"
-     "less 500"
-     "give 10% discount"
-     "total less 500"
-     "extra 1000 off"
-     "blue lehenga 500 discount 60"         → bill-level flat 60
-     "shirt 500 pant 700 discount 100"      → bill-level flat 100
-     "rice 1000 10% discount"               → bill-level percent 10
-   CRITICAL: If the discount appears at the END of the message or as a separate
-   statement → ALWAYS bill-level, even when there is only one item and the
-   discount sits right after the price. Only classify as item-level when the
-   discount is clearly attached INSIDE an item phrase such as
-   "tiles 50 each 10% off" or "tiles 500 less 50 each".
+     "discount 500"                          → bill-level flat 500
+     "less 500"                              → bill-level flat 500
+     "give 10% discount"                     → bill-level percent 10
+     "total less 500"                        → bill-level flat 500
+     "overall 10% off"                       → bill-level percent 10
+     "extra 1000 off"                        → bill-level flat 1000
+     "shirt 500 pant 700 discount 100"       → bill-level flat 100
+   The key difference: bill-level discount is DETACHED from all items or
+   explicitly says "total"/"overall"/"bill". If it sits right after one
+   item's price, it is item-level for that item.
 
 C) FINAL AMOUNT OVERRIDE
    Examples:
@@ -204,8 +212,8 @@ Set notes if you made any assumptions.
 --------------------------------------------------
 9. KEY INTERPRETATION RULES
 --------------------------------------------------
-* Discount near an item   → item-level
-* Discount at end / alone → bill-level
+* Discount directly after an item's price → item-level for THAT item
+* Discount standalone / detached from all items → bill-level
 * "make X" / "final X"    → override
 * "50 make 45"            → new unit price (NOT a discount)
 * Number without "%"      → flat ₹ discount

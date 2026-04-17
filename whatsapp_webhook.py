@@ -182,26 +182,40 @@ def verify_meta_webhook():
     return "Forbidden", 403
 
 
-def _verify_webhook_signature() -> bool:
-    """Verify Meta X-Hub-Signature-256 header. Returns True if valid or skipped."""
+def verify_whatsapp_signature(req) -> bool:
+    """
+    Verify Meta X-Hub-Signature-256 header.
+
+    STRICT: rejects the request if WHATSAPP_APP_SECRET is not configured,
+    if the signature header is missing, or if the HMAC does not match.
+    Uses hmac.compare_digest for constant-time comparison.
+    """
     if not WHATSAPP_APP_SECRET:
-        return True  # skip verification if secret not configured
-    signature_header = request.headers.get("X-Hub-Signature-256")
+        log.error(
+            "WHATSAPP_APP_SECRET not configured — refusing to process webhook. "
+            "Set this env var to enable signature verification."
+        )
+        return False
+
+    signature_header = req.headers.get("X-Hub-Signature-256")
     if not signature_header:
         log.warning("Webhook POST missing X-Hub-Signature-256 header")
         return False
+
     expected = "sha256=" + hmac.new(
-        WHATSAPP_APP_SECRET.encode(), request.get_data(), hashlib.sha256,
+        WHATSAPP_APP_SECRET.encode(), req.get_data(), hashlib.sha256,
     ).hexdigest()
+
     if not hmac.compare_digest(expected, signature_header):
-        log.warning("Webhook signature mismatch")
+        log.warning("Webhook signature mismatch — rejecting request")
         return False
+
     return True
 
 
 def handle_meta_webhook_post():
     """POST /webhook — incoming messages."""
-    if not _verify_webhook_signature():
+    if not verify_whatsapp_signature(request):
         return "Forbidden", 403
 
     body = request.get_json(silent=True)
@@ -467,7 +481,10 @@ from config import DEV_MODE
 ensure_schema(dev_mode=DEV_MODE)
 
 if not WHATSAPP_APP_SECRET:
-    log.warning("WHATSAPP_APP_SECRET not set — webhook signature verification disabled")
+    log.error(
+        "WHATSAPP_APP_SECRET not set — ALL webhook POST requests will be rejected. "
+        "Set this env var before deploying to production."
+    )
 
 if __name__ == "__main__":
     # ── PRODUCTION AUTO-SWITCH ──

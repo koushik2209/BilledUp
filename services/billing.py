@@ -152,18 +152,23 @@ def msg_history(shop_id: str) -> str:
 # PREVIEW + CONFIRMATION MESSAGES
 # ════════════════════════════════════════════════
 
+def _build_bill_items(pending: PendingBill) -> list:
+    """Build BillItem list from PendingBill item dicts."""
+    return [
+        BillItem(
+            name=i["name"], qty=i["qty"], price=abs(i["price"]),
+            hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
+            item_discount_type=i.get("item_discount_type", "none") or "none",
+            item_discount_value=float(i.get("item_discount_value", 0) or 0),
+        )
+        for i in pending.items
+    ]
+
+
 def _compute_preview_totals(pending: PendingBill) -> dict:
     """Run calculate_bill on pending items to get GST breakdown for preview."""
     try:
-        items = [
-            BillItem(
-                name=i["name"], qty=i["qty"], price=abs(i["price"]),
-                hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
-                item_discount_type=i.get("item_discount_type", "none") or "none",
-                item_discount_value=float(i.get("item_discount_value", 0) or 0),
-            )
-            for i in pending.items
-        ]
+        items = _build_bill_items(pending)
         br = calculate_bill(
             items,
             gst_client=None,
@@ -493,26 +498,9 @@ def _build_pending_from_parser(
 
 
 def _compute_bill_from_pending(pb: PendingBill):
-    """Run calculate_bill over a confirmed PendingBill.
-
-    Builds BillItems from pending dicts (preserving pre-resolved
-    HSN/GST rates and per-item discounts) and forwards pricing /
-    bill-level discount fields into the pure billing engine.
-    """
-    from core.entities import BillItem as _BI
-    from core.billing import calculate_bill as _calc
-
-    bill_items = [
-        _BI(
-            name=i["name"], qty=i["qty"], price=abs(i["price"]),
-            hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
-            item_discount_type=i.get("item_discount_type", "none") or "none",
-            item_discount_value=float(i.get("item_discount_value", 0) or 0),
-        )
-        for i in pb.items
-    ]
-    return _calc(
-        bill_items,
+    """Run calculate_bill over a confirmed PendingBill."""
+    return calculate_bill(
+        _build_bill_items(pb),
         shop_state_code=pb.shop_state_code,
         customer_state_code=pb.customer_state_code,
         bill_of_supply=pb.is_bill_of_supply,

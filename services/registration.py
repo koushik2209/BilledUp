@@ -191,8 +191,12 @@ def update_shop_gstin(phone: str, gstin: str) -> None:
     """Persist a new GSTIN to both Registration and Shop tables.
 
     Called when an existing (Bill of Supply) shop registers their GSTIN
-    mid-session. Updates both tables atomically so the next
-    load_shop_context() sees the real GSTIN instead of the placeholder.
+    mid-session so the next load_shop_context() sees the real GSTIN
+    instead of the placeholder.
+
+    Note: uses two separate sessions — not atomic. If the second write
+    (Shop table) fails, the first (Registration table) may have already
+    committed.
     """
     shop_id = "S" + re.sub(r"\D", "", phone)[-8:]
     gstin = gstin.upper().strip()

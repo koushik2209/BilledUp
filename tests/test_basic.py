@@ -2677,6 +2677,9 @@ class TestConfirmedBillComplaint:
         result = _handle_complaint(phone, "the gst seems wrong", ctx)
 
         # With an open pending bill, must NOT redirect to credit note
-        assert "RETURN" not in result or "credit note" not in result.lower(), (
+        assert "RETURN" not in result, (
+            "Should not show credit note guidance when a pending bill is open"
+        )
+        assert "credit note" not in result.lower(), (
             "Should not show credit note guidance when a pending bill is open"
         )

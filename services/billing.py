@@ -154,15 +154,27 @@ def msg_history(shop_id: str) -> str:
 
 def _build_bill_items(pending: PendingBill) -> list:
     """Build BillItem list from PendingBill item dicts."""
-    return [
-        BillItem(
+    result = []
+    for i in pending.items:
+        gst = i.get("gst_rate", 18)
+        # Safety: Tax Invoice must never have 0% GST unless the item genuinely has 0%.
+        # A non-None, non-zero original_gst means the zero is a stale BOS leftover.
+        if not pending.is_bill_of_supply and gst == 0:
+            og = i.get("original_gst")
+            if og:
+                import logging as _log
+                _log.getLogger("billedup.billing").warning(
+                    f"_build_bill_items: '{i['name']}' gst_rate=0 in Tax Invoice mode "
+                    f"— restoring original_gst={og}%"
+                )
+                gst = og
+        result.append(BillItem(
             name=i["name"], qty=i["qty"], price=abs(i["price"]),
-            hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
+            hsn=i.get("hsn", ""), gst_rate=gst,
             item_discount_type=i.get("item_discount_type", "none") or "none",
             item_discount_value=float(i.get("item_discount_value", 0) or 0),
-        )
-        for i in pending.items
-    ]
+        ))
+    return result
 
 
 def _compute_preview_totals(pending: PendingBill) -> dict:
@@ -758,8 +770,9 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
         if item_idx < 1 or item_idx > len(pending.items):
             send(from_number, f"❌ Invalid item number. You have {len(pending.items)} item(s).")
             return
-        pending.items[item_idx - 1]["gst_rate"] = new_rate
-        pending.items[item_idx - 1]["gst_source"] = "manual"
+        pending.items[item_idx - 1]["gst_rate"]    = new_rate
+        pending.items[item_idx - 1]["original_gst"] = new_rate
+        pending.items[item_idx - 1]["gst_source"]  = "manual"
         pending.created_at = datetime.utcnow()
         store_pending(from_number, pending)
         send(from_number, f"✅ Item {item_idx} GST rate → {new_rate}%\n\n{msg_preview(pending)}")
@@ -780,8 +793,9 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
                 f"_Try: *GST <item#> <rate>* (e.g., GST 1 12)_"
             )
             return
-        pending.items[matched_idx]["gst_rate"] = new_rate
-        pending.items[matched_idx]["gst_source"] = "manual"
+        pending.items[matched_idx]["gst_rate"]    = new_rate
+        pending.items[matched_idx]["original_gst"] = new_rate
+        pending.items[matched_idx]["gst_source"]  = "manual"
         pending.created_at = datetime.utcnow()
         store_pending(from_number, pending)
         send(from_number, f"✅ \"{pending.items[matched_idx]['name']}\" GST rate → {new_rate}%\n\n{msg_preview(pending)}")

@@ -2683,3 +2683,187 @@ class TestConfirmedBillComplaint:
         assert "credit note" not in result.lower(), (
             "Should not show credit note guidance when a pending bill is open"
         )
+
+
+class TestGSTToggle:
+    """GST ON/OFF toggle: original_gst preserved, rates restored on switch-back."""
+
+    @staticmethod
+    def _make_item(name: str, gst_rate: int, original_gst=None) -> dict:
+        return {
+            "name": name, "price": 500.0, "qty": 1,
+            "gst_rate": gst_rate,
+            "original_gst": original_gst,
+            "hsn": "9999", "gst_source": "default", "gst_confidence": "high",
+            "item_discount_type": "none", "item_discount_value": 0.0,
+        }
+
+    def test_make_item_dict_stores_original_gst(self):
+        """_make_item_dict must store original_gst = gst_rate by default."""
+        from conversation.executor import _make_item_dict
+        item = _make_item_dict("charger", 299.0, 1, 18, "8504", "default", "high")
+        assert item["gst_rate"]    == 18
+        assert item["original_gst"] == 18
+
+    def test_make_item_dict_bos_stores_none(self):
+        """BOS items must store original_gst=None (rate not looked up)."""
+        from conversation.executor import _make_item_dict
+        item = _make_item_dict("charger", 299.0, 1, 0, "9999", "bill_of_supply", "high", None)
+        assert item["gst_rate"]    == 0
+        assert item["original_gst"] is None
+
+    def test_toggle_to_bos_zeros_rate_and_preserves_original(self):
+        """Switching to BOS zeros gst_rate but keeps original_gst intact."""
+        from conversation.executor import _toggle_items_gst
+        items = [self._make_item("charger", 18, 18), self._make_item("cover", 12, 12)]
+        _toggle_items_gst(items, is_bos=True)
+        assert items[0]["gst_rate"] == 0
+        assert items[0]["original_gst"] == 18
+        assert items[1]["gst_rate"] == 0
+        assert items[1]["original_gst"] == 12
+
+    def test_toggle_to_tax_invoice_restores_rate(self):
+        """Switching back to Tax Invoice restores gst_rate from original_gst."""
+        from conversation.executor import _toggle_items_gst
+        # Items that had been switched to BOS (original_gst still set)
+        items = [self._make_item("charger", 0, 18), self._make_item("cover", 0, 12)]
+        _toggle_items_gst(items, is_bos=False)
+        assert items[0]["gst_rate"] == 18
+        assert items[1]["gst_rate"] == 12
+
+    def test_multiple_toggles_preserve_original(self):
+        """BOS → Tax → BOS → Tax must always restore the same original rate."""
+        from conversation.executor import _toggle_items_gst
+        items = [self._make_item("charger", 18, 18)]
+        _toggle_items_gst(items, is_bos=True)
+        assert items[0]["gst_rate"] == 0
+        _toggle_items_gst(items, is_bos=False)
+        assert items[0]["gst_rate"] == 18
+        _toggle_items_gst(items, is_bos=True)
+        assert items[0]["gst_rate"] == 0
+        assert items[0]["original_gst"] == 18  # never overwritten
+        _toggle_items_gst(items, is_bos=False)
+        assert items[0]["gst_rate"] == 18
+
+    def test_legitimately_zero_gst_preserved_in_tax_invoice(self):
+        """Items with genuine 0% GST (original_gst=0) are kept at 0 in Tax Invoice."""
+        from conversation.executor import _toggle_items_gst
+        items = [self._make_item("rice", 0, 0)]  # genuinely 0%
+        _toggle_items_gst(items, is_bos=False)
+        assert items[0]["gst_rate"] == 0
+
+    def test_handle_set_bill_type_to_bos_zeros_items(self):
+        """_handle_set_bill_type BOS switch stores original_gst and zeros gst_rate."""
+        from database import init_database
+        from services.registration import activate_trial
+        from services.pending import store_pending, get_pending_bill, PendingBill, clear_pending
+        from conversation.executor import _handle_set_bill_type
+        from conversation.context import ShopContext
+        from datetime import datetime
+
+        init_database()
+        phone = "whatsapp:+919000000101"
+        activate_trial(phone, "Toggle Shop", "Hyderabad",
+                       gstin="36AABCU9603R1ZX", state_name="Telangana", state_code="36")
+        clear_pending(phone)
+
+        pending = PendingBill(
+            phone=phone, shop_id="S00000101", shop_name="Toggle Shop",
+            shop_state="Telangana", shop_state_code="36",
+            customer_name="Ravi", customer_state="Telangana", customer_state_code="36",
+            items=[
+                {"name": "charger", "price": 499.0, "qty": 1,
+                 "gst_rate": 18, "original_gst": 18,
+                 "hsn": "8504", "gst_source": "default", "gst_confidence": "high",
+                 "item_discount_type": "none", "item_discount_value": 0.0},
+            ],
+            confidence=0.9, warnings=[], raw_message="charger 499",
+            created_at=datetime.utcnow(), is_bill_of_supply=False,
+        )
+        store_pending(phone, pending)
+
+        ctx = ShopContext(
+            phone=phone, shop_name="Toggle Shop", owner_name="Test", shop_type="general",
+            state="Telangana", state_code="36", gstin="36AABCU9603R1ZX",
+            default_pricing="exclusive", default_bill_type="", language="en",
+            conversation_history="", pending_bill=None, pending_bill_age_mins=0,
+            last_bill=None, top_items=[], frequent_customers=[],
+            bills_today=0, total_bills=1, is_new_user=False, is_power_user=False,
+            trial_active=True, trial_days_left=9,
+        )
+        _handle_set_bill_type(phone, {"set_bill_type": "bill_of_supply"}, ctx, "")
+
+        updated = get_pending_bill(phone)
+        assert updated.is_bill_of_supply is True
+        assert updated.items[0]["gst_rate"]    == 0
+        assert updated.items[0]["original_gst"] == 18
+
+    def test_handle_set_bill_type_to_tax_invoice_restores_items(self):
+        """_handle_set_bill_type Tax Invoice switch restores gst_rate from original_gst."""
+        from database import init_database
+        from services.registration import activate_trial
+        from services.pending import store_pending, get_pending_bill, PendingBill, clear_pending
+        from conversation.executor import _handle_set_bill_type
+        from conversation.context import ShopContext
+        from datetime import datetime
+
+        init_database()
+        phone = "whatsapp:+919000000102"
+        activate_trial(phone, "Restore Shop", "Hyderabad",
+                       gstin="36AABCU9603R1ZX", state_name="Telangana", state_code="36")
+        clear_pending(phone)
+
+        # Bill currently in BOS mode with original_gst saved
+        pending = PendingBill(
+            phone=phone, shop_id="S00000102", shop_name="Restore Shop",
+            shop_state="Telangana", shop_state_code="36",
+            customer_name="Ravi", customer_state="Telangana", customer_state_code="36",
+            items=[
+                {"name": "charger", "price": 499.0, "qty": 1,
+                 "gst_rate": 0, "original_gst": 18,
+                 "hsn": "8504", "gst_source": "bill_of_supply", "gst_confidence": "high",
+                 "item_discount_type": "none", "item_discount_value": 0.0},
+            ],
+            confidence=0.9, warnings=[], raw_message="charger 499",
+            created_at=datetime.utcnow(), is_bill_of_supply=True,
+        )
+        store_pending(phone, pending)
+
+        ctx = ShopContext(
+            phone=phone, shop_name="Restore Shop", owner_name="Test", shop_type="general",
+            state="Telangana", state_code="36", gstin="36AABCU9603R1ZX",
+            default_pricing="exclusive", default_bill_type="", language="en",
+            conversation_history="", pending_bill=None, pending_bill_age_mins=0,
+            last_bill=None, top_items=[], frequent_customers=[],
+            bills_today=0, total_bills=1, is_new_user=False, is_power_user=False,
+            trial_active=True, trial_days_left=9,
+        )
+        _handle_set_bill_type(phone, {"set_bill_type": "tax_invoice"}, ctx, "")
+
+        updated = get_pending_bill(phone)
+        assert updated.is_bill_of_supply is False
+        assert updated.items[0]["gst_rate"] == 18
+
+    def test_build_bill_items_safety_guard_restores_zero_in_tax_invoice(self):
+        """_build_bill_items must restore original_gst when gst_rate=0 in Tax Invoice mode."""
+        from services.billing import _build_bill_items
+        from services.pending import PendingBill
+        from datetime import datetime
+
+        pending = PendingBill(
+            phone="test", shop_id="S99999999", shop_name="Safety Shop",
+            shop_state="Telangana", shop_state_code="36",
+            customer_name="Test", customer_state="Telangana", customer_state_code="36",
+            items=[
+                {"name": "charger", "price": 499.0, "qty": 1,
+                 "gst_rate": 0, "original_gst": 18,
+                 "hsn": "8504", "gst_source": "bill_of_supply", "gst_confidence": "high",
+                 "item_discount_type": "none", "item_discount_value": 0.0},
+            ],
+            confidence=0.9, warnings=[], raw_message="charger 499",
+            created_at=datetime.utcnow(), is_bill_of_supply=False,
+        )
+        bill_items = _build_bill_items(pending)
+        assert bill_items[0].gst_rate == 18, (
+            "Safety guard must restore original_gst=18 when gst_rate=0 in Tax Invoice mode"
+        )

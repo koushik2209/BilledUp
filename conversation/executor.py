@@ -41,6 +41,7 @@ _FUZZY_REMOVE_THRESH = 70
 _FUZZY_UPDATE_THRESH = 60
 _PLACEHOLDER_GSTIN   = "GSTIN00000000000"
 _STATE_NAME_TO_CODE: dict[str, str] = {v: k for k, v in INDIAN_STATES.items()}
+_UNSET = object()  # sentinel: "default original_gst to gst_rate" in _make_item_dict
 
 
 def _resolve_customer_state(raw: str) -> tuple[str, str] | None:
@@ -765,10 +766,7 @@ def _handle_set_bill_type(
         if is_bos:
             pending.is_inclusive = False
             pending.pricing_type = "exclusive"
-            # Zero out GST rates for Bill of Supply
-            for item in pending.items:
-                item["gst_rate"]   = 0
-                item["gst_source"] = "bill_of_supply"
+        _toggle_items_gst(pending.items, is_bos, shop_id=pending.shop_id)
         pending.created_at = datetime.utcnow()
         store_pending(phone, pending)
 
@@ -1007,12 +1005,14 @@ def _apply_bill_changes(pending: PendingBill, bill_changes: dict) -> PendingBill
         pending.is_inclusive = (pt == "inclusive")
 
     bt = (bill_changes.get("set_bill_type") or "").lower()
-    if bt == "bill_of_supply":
+    if bt == "bill_of_supply" and not pending.is_bill_of_supply:
         pending.is_bill_of_supply = True
         pending.is_inclusive      = False
         pending.pricing_type      = "exclusive"
-    elif bt == "tax_invoice":
+        _toggle_items_gst(pending.items, True)
+    elif bt == "tax_invoice" and pending.is_bill_of_supply:
         pending.is_bill_of_supply = False
+        _toggle_items_gst(pending.items, False, shop_id=pending.shop_id)
 
     return pending
 
@@ -1217,7 +1217,8 @@ def _resolve_gst_for_items(
         qty   = max(0.01, qty)
 
         if is_bos:
-            item = _make_item_dict(name, price, qty, 0, "9999", "bill_of_supply", "high")
+            # original_gst=None: rate not looked up yet; restored if toggled to Tax Invoice
+            item = _make_item_dict(name, price, qty, 0, "9999", "bill_of_supply", "high", None)
         else:
             try:
                 rate_info = get_gst_rate_smart(name, client, shop_id=shop_id)
@@ -1258,7 +1259,8 @@ def _resolve_gst_for_last_bill_items(
         qty   = max(0.01, qty)
 
         if is_bos:
-            item = _make_item_dict(name, price, qty, 0, "9999", "bill_of_supply", "high")
+            # original_gst=None: rate not looked up yet; restored if toggled to Tax Invoice
+            item = _make_item_dict(name, price, qty, 0, "9999", "bill_of_supply", "high", None)
         else:
             try:
                 rate_info = get_gst_rate_smart(name, client, shop_id=shop_id)
@@ -1287,19 +1289,63 @@ def _make_item_dict(
     hsn: str,
     source: str,
     confidence: str,
+    original_gst=_UNSET,
 ) -> dict:
-    """Build a pending-bill item dict in the canonical format."""
+    """Build a pending-bill item dict in the canonical format.
+
+    original_gst stores the item's true GST rate independent of BOS toggle:
+    - Omit (default _UNSET) → original_gst = gst_rate (Tax Invoice items)
+    - Pass None             → original_gst = None (BOS items, rate unknown until toggled)
+    """
     return {
         "name":               name,
         "price":              price,
         "qty":                qty,
         "gst_rate":           gst_rate,
+        "original_gst":       gst_rate if original_gst is _UNSET else original_gst,
         "hsn":                hsn,
         "gst_source":         source,
         "gst_confidence":     confidence,
         "item_discount_type": "none",
         "item_discount_value": 0.0,
     }
+
+
+def _toggle_items_gst(items: list, is_bos: bool, shop_id: str = "") -> None:
+    """Flip per-item gst_rate when switching bill type.
+
+    BOS   → backup original_gst (if not already saved), zero gst_rate.
+    Tax   → restore gst_rate from original_gst; re-resolve via API if unknown (None).
+
+    Invariant: original_gst is never overwritten once set to a non-None value.
+    """
+    if is_bos:
+        for item in items:
+            if item.get("original_gst") is None:
+                current = item.get("gst_rate", 0)
+                if current and current > 0:
+                    item["original_gst"] = current
+            item["gst_rate"]   = 0
+            item["gst_source"] = "bill_of_supply"
+    else:
+        for item in items:
+            og = item.get("original_gst")
+            if og is not None:
+                item["gst_rate"]   = og
+                item["gst_source"] = "restored"
+            else:
+                # Item created in BOS mode — look up the real rate now
+                try:
+                    client    = get_anthropic_client()
+                    rate_info = get_gst_rate_smart(item["name"], client, shop_id=shop_id)
+                    rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
+                    resolved  = int(rate_info.get("gst", 18))
+                except Exception as exc:
+                    log.warning(f"_toggle_items_gst: re-resolve failed for '{item['name']}': {exc} — using 18%")
+                    resolved = 18
+                item["gst_rate"]    = resolved
+                item["original_gst"] = resolved
+                item["gst_source"]  = "resolved"
 
 
 def _add_items_to_pending(

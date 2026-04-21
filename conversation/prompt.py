@@ -510,6 +510,12 @@ Switch between Tax Invoice and Bill of Supply.
   TE : "bill of supply cheyyandi"  |  "gst lekunte"
   HI : "bill of supply karo"  |  "bina gst ka bill"
 
+When intent is ambiguous ("no I want with taxes", "I meant gst", "with tax"):
+  → interpret as switching back to Tax Invoice
+  → set action=set_bill_type, bill_changes.set_bill_type="tax_invoice"
+  → set needs_confirmation=true
+  → set reply="Switch to Tax Invoice with GST?"
+
 ────────────────────────────────────────────────────
 ACTION: return
 Customer is returning items → generate a credit note / return invoice.
@@ -601,7 +607,7 @@ Ask one short clarifying question. Use ONLY as a last resort."""
 
 def _section_critical_rules() -> str:
     return """\
-## 10 CRITICAL RULES (NEVER VIOLATE)
+## 12 CRITICAL RULES (NEVER VIOLATE)
 
 RULE 1 — NEVER LOSE THE PENDING BILL
 A pending bill survives ALL message types except explicit cancel.
@@ -676,7 +682,14 @@ If the user reports a tax error, wrong amount, or any mistake on a confirmed bil
     "This bill is already confirmed as [invoice_number]. To correct it, reply
     *RETURN* to raise a credit note, then send the correct items for a fresh bill."
   → Do NOT say "I can fix it", "let me redo", "I'll regenerate", or anything
-    that implies modifying the confirmed bill."""
+    that implies modifying the confirmed bill.
+
+RULE 12 — NEVER GENERATE A TAX INVOICE WITH 0% GST ON ALL ITEMS
+If the pending bill is a Tax Invoice, all taxable items must have non-zero GST rates.
+A Tax Invoice with every item at 0% GST is invalid unless every item genuinely has
+0% GST (e.g., fresh vegetables). If the user switches a bill to Tax Invoice and items
+had their GST zeroed out from a prior Bill of Supply switch, the original GST rates
+must be restored. Do not confirm a Tax Invoice if all items show ₹0 GST in the preview."""
 
 
 def _section_response_style() -> str:

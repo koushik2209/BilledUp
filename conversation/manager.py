@@ -21,11 +21,12 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import datetime
 from typing import Optional
 
 from services.pending import get_pending_bill, clear_pending, store_pending
-from services.billing import msg_preview
+from services.billing import msg_preview, msg_today_summary, msg_history
 from services.registration import get_shop_id as _derive_shop_id
 from db.item_master import get_top_items
 
@@ -34,6 +35,11 @@ from conversation.prompt import build_system_prompt, build_messages
 from conversation.executor import execute_action
 
 log = logging.getLogger("billedup.conversation.manager")
+
+# Gemini is configured once per process — calling genai.configure() on every
+# request mutates a module-level global and is unsafe under gthread workers.
+_gemini_configured = False
+_gemini_lock = threading.Lock()
 
 
 # ════════════════════════════════════════════════
@@ -82,11 +88,13 @@ def handle_message(phone: str, text: str) -> str:
             "Type *help* for all options."
         )
 
+    tag = phone[-4:]  # last 4 digits only — avoid logging full phone (PII)
+
     # 2. Load context
     try:
         ctx = load_shop_context(phone)
     except Exception as exc:
-        log.error(f"load_shop_context failed for {phone}: {exc}", exc_info=True)
+        log.error(f"load_shop_context failed for …{tag}: {exc}", exc_info=True)
         return (
             "⚠️ Could not load your shop data. Please try again.\n"
             "If this keeps happening, type *help* or contact support."
@@ -96,24 +104,23 @@ def handle_message(phone: str, text: str) -> str:
     try:
         hard_reply = _check_hard_command(text, phone, ctx)
         if hard_reply is not None:
-            _log_outgoing(phone, hard_reply)
             return hard_reply
     except Exception as exc:
-        log.warning(f"Hard command check failed for {phone}: {exc}", exc_info=True)
+        log.warning(f"Hard command check failed for …{tag}: {exc}", exc_info=True)
 
     # 4. Build system prompt + messages
     try:
         system_prompt = build_system_prompt(ctx)
         messages      = build_messages(ctx, text)
     except Exception as exc:
-        log.error(f"Prompt build failed for {phone}: {exc}", exc_info=True)
+        log.error(f"Prompt build failed for …{tag}: {exc}", exc_info=True)
         return _llm_fallback_reply(ctx)
 
     # 5. Call LLM
     try:
         raw_result = _call_llm(system_prompt, messages)
     except Exception as exc:
-        log.error(f"LLM call failed for {phone}: {exc}", exc_info=True)
+        log.error(f"LLM call failed for …{tag}: {exc}", exc_info=True)
         return _llm_fallback_reply(ctx)
 
     # 6. Validate
@@ -121,18 +128,17 @@ def handle_message(phone: str, text: str) -> str:
     log.info(
         f"LLM action: {result['action']} | "
         f"show_preview={result['show_preview']} | "
-        f"phone={phone}"
+        f"phone=…{tag}"
     )
 
     # 7. Execute
     try:
         reply = execute_action(result, phone, ctx)
     except Exception as exc:
-        log.error(f"execute_action failed for {phone}: {exc}", exc_info=True)
+        log.error(f"execute_action failed for …{tag}: {exc}", exc_info=True)
         return "Something went wrong. Please try again or type *help*."
 
-    # 8. Log + return
-    _log_outgoing(phone, reply)
+    # 8. Return — billing.send() in the router already logs OUT messages
     return reply
 
 
@@ -224,6 +230,20 @@ def _check_hard_command(
             phone, ctx,
         )
 
+    # ── Today summary ─────────────────────────────
+    if t in ("today", "aaj", "summary", "today's sales", "aaj ka"):
+        shop_id = _derive_shop_id(phone)
+        return msg_today_summary(shop_id, ctx.shop_name, ctx.trial_days_left)
+
+    # ── Bill history ──────────────────────────────
+    if t in ("history", "bills", "recent"):
+        shop_id = _derive_shop_id(phone)
+        return msg_history(shop_id)
+
+    # ── Greeting → help ───────────────────────────
+    if t in ("hi", "hello", "hai", "start", "hey"):
+        return execute_action(_validate_result({"action": "help"}), phone, ctx)
+
     return None   # Not a hard command — forward to LLM
 
 
@@ -237,13 +257,19 @@ def _call_gemini(system_prompt: str, messages: list) -> dict:
     google-generativeai is imported inside this function so the app
     starts even if the package is not installed (Haiku will be used).
     """
+    global _gemini_configured
     import google.generativeai as genai  # optional dep
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise ValueError("GEMINI_API_KEY not configured")
 
-    genai.configure(api_key=api_key)
+    if not _gemini_configured:
+        with _gemini_lock:
+            if not _gemini_configured:
+                genai.configure(api_key=api_key)
+                _gemini_configured = True
+
     model = genai.GenerativeModel(
         model_name         = "gemini-2.0-flash",
         system_instruction = system_prompt,
@@ -418,7 +444,6 @@ def _validate_result(result: dict) -> dict:
     result["needs_confirmation"]   = bool(result.get("needs_confirmation",   False))
     result["is_duplicate_warning"] = bool(result.get("is_duplicate_warning", False))
     result["is_typo_warning"]      = bool(result.get("is_typo_warning",      False))
-    result["context_switched"]     = bool(result.get("context_switched",     False))
 
     # report_range — one of the valid strings or None
     rr = str(result.get("report_range") or "").lower().strip()
@@ -594,17 +619,6 @@ def _handle_edit(phone: str, ctx: ShopContext) -> str:
         return "✏️ Bill cleared. Send items to start fresh."
 
 
-def _log_outgoing(phone: str, message: str) -> None:
-    """Persist outgoing message to conversation log (non-fatal)."""
-    if not message:
-        return
-    try:
-        from services.registration import log_message
-        log_message(phone, "OUT", message)
-    except Exception as exc:
-        log.warning(f"_log_outgoing failed for {phone}: {exc}")
-
-
 def _llm_fallback_reply(ctx: ShopContext) -> str:
     """Friendly reply shown when the LLM is completely unavailable."""
     lang = ctx.language or "en"
@@ -630,7 +644,6 @@ def _llm_fallback_reply(ctx: ShopContext) -> str:
 
 
 def _safe_float(value, default):
-    """Safely convert a value to float."""
     if value is None:
         return default
     try:

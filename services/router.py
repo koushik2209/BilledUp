@@ -41,10 +41,7 @@ def _clean_input(text: str) -> str:
 
 def _safe_send(phone: str, message: str) -> bool:
     try:
-        ok = send(phone, message)
-        if ok:
-            log_message(phone, "OUT", message)
-        return ok
+        return send(phone, message)
     except Exception as e:
         log.error(f"Send failed to {phone}: {e}")
         return False
@@ -52,7 +49,10 @@ def _safe_send(phone: str, message: str) -> bool:
 
 def _is_skip_gstin(text: str) -> bool:
     t = text.lower()
-    return any(x in t for x in ["skip", "no gst", "dont have", "don't have", "none"])
+    return (
+        any(x in t for x in ["skip", "no gst", "dont have", "don't have"])
+        or bool(re.search(r"\bnone\b", t))
+    )
 
 
 def _fallback_reply() -> str:
@@ -213,15 +213,16 @@ def handle_message(from_number: str, message: str):
             try:
                 from conversation.manager import handle_message as conv_handle
                 reply = conv_handle(from_number, message)
-
-                if not reply:
-                    reply = _fallback_reply()
-
             except Exception as e:
                 log.error(f"Conversation error: {e}")
                 reply = _fallback_reply()
 
-            _safe_send(from_number, reply)
+            # None = unexpected error path → send fallback
+            # "" = handler already sent its own messages (PDF confirm, report) → skip
+            if reply is None:
+                reply = _fallback_reply()
+            if reply:
+                _safe_send(from_number, reply)
             return
 
         # ── EXPIRED ──

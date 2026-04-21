@@ -88,6 +88,13 @@ def execute_action(result: dict, phone: str, ctx: ShopContext) -> str:
         if action == "set_customer":
             return _handle_set_customer(phone, bill_changes, ctx, reply)
         if action == "set_discount":
+            # If the LLM flagged uncertainty (e.g. very large discount), ask user
+            # to confirm the discount first without applying it yet.
+            if result.get("needs_confirmation") and reply:
+                pending = get_pending_bill(phone)
+                if pending:
+                    return _with_pending_reminder(reply, ctx)
+                return reply
             return _handle_set_discount(phone, bill_changes, ctx, reply)
         if action == "set_pricing":
             return _handle_set_pricing(phone, bill_changes, ctx, reply)
@@ -680,11 +687,13 @@ def _handle_return(
     ctx: ShopContext,
     reply: str,
 ) -> str:
-    """Return / credit note intent — pass through LLM reply.
+    """Return / credit note intent.
 
-    Full return processing is handled by the existing billing flow
-    (detect_return_intent + negate_items) when the user confirms.
-    The LLM reply should already contain the return bill preview.
+    Three cases:
+    1. Live pending bill exists → mark it as a return and show preview.
+    2. No pending bill but items were sent in this message → create pending,
+       mark as return, show preview.
+    3. No pending bill and no items → ask user to send the return items.
     """
     try:
         pending = get_pending_bill(phone)
@@ -696,6 +705,25 @@ def _handle_return(
                 (reply + "\n\n" if reply else "")
                 + msg_preview(pending)
             )
+
+        # No live pending — check if items were included in this very message.
+        # _handle_billing's return value (always a preview string) is discarded;
+        # we use it only for its side effect of calling store_pending.
+        add_items = bill_changes.get("add_items") or []
+        if add_items:
+            billing_result = _handle_billing(phone, bill_changes, ctx, reply, show_preview=False)
+            new_pending = get_pending_bill(phone)
+            if new_pending:
+                new_pending.is_return  = True
+                new_pending.created_at = datetime.utcnow()
+                store_pending(phone, new_pending)
+                return (
+                    (reply + "\n\n" if reply else "")
+                    + msg_preview(new_pending)
+                )
+            # _handle_billing failed silently — surface its error reply
+            return billing_result
+
         return _with_pending_reminder(
             reply or (
                 "To process a return, please send the items being returned.\n"

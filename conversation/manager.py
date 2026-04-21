@@ -454,6 +454,14 @@ def _validate_result(result: dict) -> dict:
     sdbt = str(bc.get("set_default_bill_type") or "").lower().strip()
     bc["set_default_bill_type"] = sdbt if sdbt in ("tax_invoice", "bill_of_supply") else None
 
+    # set_customer_state — state name string or None
+    scs = bc.get("set_customer_state")
+    bc["set_customer_state"] = (
+        str(scs).strip()
+        if scs and str(scs).lower().strip() not in ("null", "none", "")
+        else None
+    )
+
     # set_gstin — 15-char validated GSTIN string | None
     sg = str(bc.get("set_gstin") or "").upper().strip()
     bc["set_gstin"] = sg if sg and is_valid_gstin(sg) else None

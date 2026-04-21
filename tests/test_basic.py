@@ -2426,3 +2426,257 @@ class TestDefaultBillType:
         assert pending.is_bill_of_supply is True, (
             "Per-message set_bill_type='bill_of_supply' must override default_bill_type"
         )
+
+
+class TestCustomerStateExtraction:
+    """Bug 1: Customer state in billing message must set inter-state (IGST) calculation."""
+
+    @staticmethod
+    def _make_ctx(phone: str, shop_state: str = "Telangana", shop_state_code: str = "36"):
+        from conversation.context import ShopContext
+        return ShopContext(
+            phone=phone,
+            shop_name="Test Shop",
+            owner_name="Test",
+            shop_type="general",
+            state=shop_state,
+            state_code=shop_state_code,
+            gstin="36AABCU9603R1ZX",
+            default_pricing="exclusive",
+            default_bill_type="",
+            language="en",
+            conversation_history="",
+            pending_bill=None,
+            pending_bill_age_mins=0,
+            last_bill=None,
+            top_items=[],
+            frequent_customers=[],
+            bills_today=0,
+            total_bills=5,
+            is_new_user=False,
+            is_power_user=False,
+            trial_active=True,
+            trial_days_left=9,
+        )
+
+    def test_customer_state_from_billing_message_sets_correct_state(self):
+        """set_customer_state in bill_changes resolves and sets customer_state on PendingBill."""
+        from database import init_database
+        from services.registration import activate_trial
+        from services.pending import get_pending_bill, clear_pending
+        from conversation.executor import _handle_billing
+
+        init_database()
+        phone = "whatsapp:+919000000081"
+        activate_trial(phone, "State Test Shop", "Hyderabad", gstin="36AABCU9603R1ZX",
+                       state_name="Telangana", state_code="36")
+        clear_pending(phone)
+
+        ctx = self._make_ctx(phone)
+        # LLM extracted "maharastra" from "shirt 500 state maharastra"
+        bill_changes = {
+            "add_items": [{"name": "shirt", "qty": 1, "price": 500}],
+            "set_customer_state": "maharastra",
+        }
+        _handle_billing(phone, bill_changes, ctx, "", show_preview=False)
+
+        pending = get_pending_bill(phone)
+        assert pending is not None
+        assert pending.customer_state == "Maharashtra", (
+            f"Expected 'Maharashtra', got '{pending.customer_state}'"
+        )
+        assert pending.customer_state_code == "27", (
+            f"Expected state code '27', got '{pending.customer_state_code}'"
+        )
+
+    def test_customer_state_defaults_to_shop_state_when_absent(self):
+        """Without set_customer_state, customer_state stays as shop state (intra-state)."""
+        from database import init_database
+        from services.registration import activate_trial
+        from services.pending import get_pending_bill, clear_pending
+        from conversation.executor import _handle_billing
+
+        init_database()
+        phone = "whatsapp:+919000000082"
+        activate_trial(phone, "No State Shop", "Hyderabad", gstin="36AABCU9603R1ZX",
+                       state_name="Telangana", state_code="36")
+        clear_pending(phone)
+
+        ctx = self._make_ctx(phone)
+        bill_changes = {"add_items": [{"name": "shirt", "qty": 1, "price": 500}]}
+        _handle_billing(phone, bill_changes, ctx, "", show_preview=False)
+
+        pending = get_pending_bill(phone)
+        assert pending is not None
+        assert pending.customer_state == "Telangana"
+        assert pending.customer_state_code == "36"
+
+    def test_unrecognised_customer_state_falls_back_to_shop_state(self):
+        """If resolve_state returns None (unrecognised), shop state is kept."""
+        from database import init_database
+        from services.registration import activate_trial
+        from services.pending import get_pending_bill, clear_pending
+        from conversation.executor import _handle_billing
+
+        init_database()
+        phone = "whatsapp:+919000000083"
+        activate_trial(phone, "Fallback State Shop", "Hyderabad", gstin="36AABCU9603R1ZX",
+                       state_name="Telangana", state_code="36")
+        clear_pending(phone)
+
+        ctx = self._make_ctx(phone)
+        bill_changes = {
+            "add_items": [{"name": "shirt", "qty": 1, "price": 500}],
+            "set_customer_state": "xyz_unknown_state_99",
+        }
+        _handle_billing(phone, bill_changes, ctx, "", show_preview=False)
+
+        pending = get_pending_bill(phone)
+        assert pending is not None
+        assert pending.customer_state == "Telangana"
+        assert pending.customer_state_code == "36"
+
+    def test_validate_bill_changes_normalises_set_customer_state(self):
+        """_validate_result passes through a non-empty set_customer_state."""
+        import sys
+        sys.path.insert(0, ".")
+        from conversation.manager import _validate_result
+
+        result = _validate_result({
+            "action": "billing",
+            "bill_changes": {
+                "add_items": [{"name": "shirt", "price": 500, "qty": 1}],
+                "set_customer_state": "  Maharashtra  ",
+            },
+        })
+        assert result["bill_changes"]["set_customer_state"] == "Maharashtra"
+
+    def test_validate_bill_changes_nulls_empty_set_customer_state(self):
+        """_validate_result normalises null/empty set_customer_state to None."""
+        from conversation.manager import _validate_result
+
+        for v in (None, "null", "", "none"):
+            result = _validate_result({
+                "action": "billing",
+                "bill_changes": {"set_customer_state": v},
+            })
+            assert result["bill_changes"]["set_customer_state"] is None, (
+                f"Expected None for input {v!r}"
+            )
+
+
+class TestConfirmedBillComplaint:
+    """Bug 2: Complaints about confirmed bills must never offer to regenerate."""
+
+    @staticmethod
+    def _make_ctx(phone: str, last_bill=None):
+        from conversation.context import ShopContext
+        return ShopContext(
+            phone=phone,
+            shop_name="Test Shop",
+            owner_name="Test",
+            shop_type="general",
+            state="Telangana",
+            state_code="36",
+            gstin="36AABCU9603R1ZX",
+            default_pricing="exclusive",
+            default_bill_type="",
+            language="en",
+            conversation_history="",
+            pending_bill=None,
+            pending_bill_age_mins=0,
+            last_bill=last_bill,
+            top_items=[],
+            frequent_customers=[],
+            bills_today=1,
+            total_bills=5,
+            is_new_user=False,
+            is_power_user=False,
+            trial_active=True,
+            trial_days_left=9,
+        )
+
+    def test_complaint_about_confirmed_bill_returns_credit_note_guidance(self):
+        """When no pending bill exists and a confirmed bill is present, complaint
+        handler must return RETURN/credit note guidance, never offer to regenerate."""
+        from database import init_database
+        from services.pending import clear_pending
+        from conversation.executor import _handle_complaint
+
+        init_database()
+        phone = "whatsapp:+919000000071"
+        clear_pending(phone)
+
+        last_bill = {
+            "invoice_number": "INV-TL-2024-001",
+            "date": "21 Apr 2024",
+            "customer_name": "Ravi",
+            "customer_phone": "",
+            "items": [{"name": "shirt", "qty": 1, "price": 500}],
+            "grand_total": 590.0,
+            "pricing_type": "exclusive",
+        }
+        ctx = self._make_ctx(phone, last_bill=last_bill)
+
+        result = _handle_complaint(phone, "its igst right", ctx)
+
+        assert "INV-TL-2024-001" in result, "Must mention the confirmed invoice number"
+        assert "RETURN" in result, "Must instruct user to reply RETURN"
+        assert "credit note" in result.lower(), "Must mention credit note"
+
+        # Must NOT offer regeneration
+        regen_words = ["regenerate", "redo", "i can fix", "let me fix", "i'll fix"]
+        lower = result.lower()
+        for word in regen_words:
+            assert word not in lower, f"Must not contain '{word}' in reply"
+
+    def test_complaint_without_confirmed_bill_shows_normal_reply(self):
+        """When no last_bill, complaint falls through to the normal acknowledgement."""
+        from database import init_database
+        from services.pending import clear_pending
+        from conversation.executor import _handle_complaint
+
+        init_database()
+        phone = "whatsapp:+919000000072"
+        clear_pending(phone)
+
+        ctx = self._make_ctx(phone, last_bill=None)
+        result = _handle_complaint(phone, "Something went wrong", ctx)
+
+        assert "Something went wrong" in result
+        # No credit-note redirect when there's no confirmed bill
+        assert "RETURN" not in result
+
+    def test_complaint_with_pending_bill_shows_normal_reply(self):
+        """When a pending bill IS open, complaint is about the current in-progress bill."""
+        from database import init_database
+        from services.registration import activate_trial
+        from services.pending import store_pending, PendingBill
+        from conversation.executor import _handle_complaint
+        from datetime import datetime
+
+        init_database()
+        phone = "whatsapp:+919000000073"
+        activate_trial(phone, "Pending Complaint Shop", "Hyderabad",
+                       gstin="36AABCU9603R1ZX", state_name="Telangana", state_code="36")
+
+        pending = PendingBill(
+            phone=phone, shop_id="S00000073", shop_name="Test",
+            shop_state="Telangana", shop_state_code="36",
+            customer_name="Customer", customer_state="Telangana",
+            customer_state_code="36", items=[{"name": "shirt", "qty": 1, "price": 500}],
+            confidence=0.9, warnings=[], raw_message="shirt 500",
+            created_at=datetime.utcnow(),
+        )
+        store_pending(phone, pending)
+
+        last_bill = {"invoice_number": "INV-001", "date": "21 Apr", "customer_name": "Ravi",
+                     "customer_phone": "", "items": [], "grand_total": 500.0, "pricing_type": "exclusive"}
+        ctx = self._make_ctx(phone, last_bill=last_bill)
+
+        result = _handle_complaint(phone, "the gst seems wrong", ctx)
+
+        # With an open pending bill, must NOT redirect to credit note
+        assert "RETURN" not in result or "credit note" not in result.lower(), (
+            "Should not show credit note guidance when a pending bill is open"
+        )

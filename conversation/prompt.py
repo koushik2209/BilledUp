@@ -180,6 +180,7 @@ _JSON_SCHEMA = """\
     "set_pricing_type": "inclusive|exclusive|null",
     "set_bill_type": "tax_invoice|bill_of_supply|null",
     "set_default_bill_type": "tax_invoice|bill_of_supply|null",
+    "set_customer_state": "state name or null",
     "set_gstin": "15-char GSTIN string or null",
     "load_last_bill": false
   },
@@ -390,11 +391,22 @@ New bill started from scratch. Parse ALL items in one action.
 
   EN : "charger 499 cover 199 Ramesh"
   EN : "2 shirts 500 pants 700 for Suresh"
+  EN : "shirt 500 state Maharashtra"  |  "charger 499 Ravi Maharashtra"
   TE : "rendu charger 499 cover 199 Ramesh kosam"
   TE : "moodu shirt 500 Ramesh ki"
   HI : "do charger 499 cover 199 Ramesh ke liye"
   HI : "teen shirt 500 Ramesh ka bill"
 Use when: no pending bill exists OR user explicitly started a new bill after cancel.
+
+Customer state extraction:
+  If the message mentions a state name ("Maharashtra", "Karnataka", "state Karnataka",
+  "Andhra", "Tamil Nadu", etc.), extract it into bill_changes.set_customer_state.
+  This enables IGST calculation for inter-state bills.
+  Examples:
+    "shirt 500 state maharastra" → set_customer_state: "maharastra"
+    "charger 499 customer Ravi Maharashtra" → set_customer_state: "Maharashtra"
+    "shirt 500 rajesh karnataka" → set_customer_state: "karnataka"
+  Do NOT confuse city names (Bangalore, Mumbai) with state names.
 
 ────────────────────────────────────────────────────
 ACTION: add_item
@@ -530,10 +542,14 @@ Answer briefly (in the reply field) then set context_switched=true if pending bi
 ACTION: complaint
 User reports a mistake or expresses frustration about a past bill.
 
-  EN : "last bill was wrong"  |  "wrong amount"
+  EN : "last bill was wrong"  |  "wrong amount"  |  "its igst right"
   TE : "last bill thappu undi"  |  "GST calculation thappu"
   HI : "pichla bill galat tha"  |  "amount galat tha"
-Acknowledge the issue, offer to show the last bill or re-do it.
+
+If NO pending bill exists (bill already confirmed): apply RULE 11 — direct the
+user to the RETURN / credit note process. NEVER offer to regenerate the bill.
+
+If a pending bill exists: acknowledge the issue and offer to adjust the pending bill.
 
 ────────────────────────────────────────────────────
 ACTION: greeting
@@ -648,7 +664,19 @@ RULE 10 — CONTEXT SWITCH REMINDER
 When the user sends a question, report request, greeting, or complaint WHILE a
 pending bill exists, ALWAYS append a reminder at the end of the reply field using
 the correct language (see LANGUAGE INSTRUCTION section for the exact phrase).
-Set context_switched=true."""
+Set context_switched=true.
+
+RULE 11 — NEVER REGENERATE A CONFIRMED BILL
+Once a bill is confirmed and the PDF is sent (CURRENT PENDING BILL = None AND
+LAST COMPLETED BILL is shown in SHOP MEMORY), that bill is legally finalised.
+You MUST NOT offer to regenerate, redo, or modify it under any circumstances.
+If the user reports a tax error, wrong amount, or any mistake on a confirmed bill:
+  → Set action=complaint
+  → In the reply field write ONLY:
+    "This bill is already confirmed as [invoice_number]. To correct it, reply
+    *RETURN* to raise a credit note, then send the correct items for a fresh bill."
+  → Do NOT say "I can fix it", "let me redo", "I'll regenerate", or anything
+    that implies modifying the confirmed bill."""
 
 
 def _section_response_style() -> str:
@@ -687,6 +715,7 @@ def _section_json_format() -> str:
         "set_pricing_type  : 'inclusive' | 'exclusive' | null\n"
         "set_bill_type         : 'tax_invoice' | 'bill_of_supply' | null  (current bill only)\n"
         "set_default_bill_type : 'tax_invoice' | 'bill_of_supply' | null  (saved shop default)\n"
+        "set_customer_state    : state name string (e.g. 'Maharashtra') or null\n"
         "load_last_bill    : true only for 'same as last bill' variants\n"
         "reply             : exact WhatsApp message, max 6 lines, no markdown headers\n"
         "show_preview      : true when bill preview must be shown after execution\n"

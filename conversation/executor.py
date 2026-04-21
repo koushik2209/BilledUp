@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process as fuzz_process
 
 from config import get_anthropic_client
 from gst_rates import get_gst_rate_smart, adjust_gst_for_price
@@ -30,7 +30,7 @@ from services.billing import (
 )
 from services.registration import (
     get_registration, get_shop_id as _derive_shop_id,
-    update_shop_gstin, update_shop_default_bill_type,
+    update_shop_gstin, update_shop_default_bill_type, resolve_state, INDIAN_STATES,
 )
 from conversation.context import ShopContext
 
@@ -40,6 +40,27 @@ _PENDING_EXPIRY_MINS = 10
 _FUZZY_REMOVE_THRESH = 70
 _FUZZY_UPDATE_THRESH = 60
 _PLACEHOLDER_GSTIN   = "GSTIN00000000000"
+
+
+def _resolve_customer_state(raw: str) -> tuple[str, str] | None:
+    """Resolve a raw state string to (state_name, state_code).
+
+    Tries exact/substring match first (resolve_state), then falls back to
+    rapidfuzz for misspellings the LLM may have preserved (e.g. 'maharastra').
+    Returns None if no match found above the 70 % similarity threshold.
+    """
+    if not raw:
+        return None
+    result = resolve_state(raw)
+    if result:
+        return result
+    m = fuzz_process.extractOne(raw, list(INDIAN_STATES.values()),
+                                scorer=fuzz.WRatio, score_cutoff=70)
+    if m:
+        for code, name in INDIAN_STATES.items():
+            if name == m[0]:
+                return name, code
+    return None
 
 
 # ════════════════════════════════════════════════
@@ -176,6 +197,15 @@ def _handle_billing(
         customer_name  = (bill_changes.get("set_customer") or "").strip() or "Customer"
         customer_phone = (bill_changes.get("set_customer_phone") or "").strip()
 
+        # Resolve customer state — default to shop state, override if message specifies one
+        customer_state      = ctx.state or ""
+        customer_state_code = ctx.state_code or ""
+        raw_cust_state = (bill_changes.get("set_customer_state") or "").strip()
+        if raw_cust_state:
+            resolved = _resolve_customer_state(raw_cust_state)
+            if resolved:
+                customer_state, customer_state_code = resolved
+
         disc_type, disc_value = _extract_discount(bill_changes)
 
         pending = PendingBill(
@@ -185,8 +215,8 @@ def _handle_billing(
             shop_state          = ctx.state or "",
             shop_state_code     = ctx.state_code or "",
             customer_name       = customer_name,
-            customer_state      = ctx.state or "",
-            customer_state_code = ctx.state_code or "",
+            customer_state      = customer_state,
+            customer_state_code = customer_state_code,
             items               = items,
             confidence          = 1.0,
             warnings            = [],
@@ -837,15 +867,33 @@ def _handle_complaint(
     reply: str,
     ctx: ShopContext,
 ) -> str:
-    """Acknowledge a complaint and optionally show last bill details."""
+    """Acknowledge a complaint and optionally show last bill details.
+
+    Safety net: if the complaint is about a confirmed bill (no pending bill
+    in DB), always redirect to the credit note process — never offer to
+    regenerate a legally finalised bill.
+    """
     try:
+        lb = ctx.last_bill
+
+        # Confirmed-bill guard: no pending bill + a last confirmed bill exists
+        # → the user is complaining about a finalised invoice
+        if lb and not get_pending_bill(phone):
+            inv = lb.get("invoice_number") or "your last bill"
+            return (
+                f"📋 *{inv}* has already been confirmed and the PDF sent.\n\n"
+                "To correct it:\n"
+                "1️⃣ Reply *RETURN* to raise a credit note\n"
+                "2️⃣ Then send the correct items for a fresh bill\n\n"
+                "_Confirmed bills cannot be modified — this protects your GST records._"
+            )
+
         if not reply:
             reply = (
                 "I'm sorry about that! Let me help you fix it.\n"
                 "Could you tell me what was wrong?"
             )
-        if ctx.last_bill:
-            lb = ctx.last_bill
+        if lb:
             items_str = _format_items_mini(lb.get("items") or [])
             reply += (
                 f"\n\n📋 *Your last bill:*\n"
@@ -936,6 +984,12 @@ def _apply_bill_changes(pending: PendingBill, bill_changes: dict) -> PendingBill
     cust_phone = bill_changes.get("set_customer_phone")
     if _is_set(cust_phone):
         pending.customer_phone = str(cust_phone).strip()
+
+    raw_cust_state = (bill_changes.get("set_customer_state") or "").strip()
+    if raw_cust_state:
+        resolved = _resolve_customer_state(raw_cust_state)
+        if resolved:
+            pending.customer_state, pending.customer_state_code = resolved
 
     disc_info = bill_changes.get("set_discount") or {}
     disc_type  = _safe_discount_type(disc_info.get("type"))

@@ -184,6 +184,11 @@ def update_shop_default_bill_type(phone: str, bill_type: str) -> None:
         shop = session.query(Shop).filter_by(shop_id=shop_id).first()
         if shop:
             shop.default_bill_type = bill_type
+        else:
+            log.warning(
+                f"update_shop_default_bill_type: no Shop row found for "
+                f"phone={phone[-4:]} — default_bill_type not saved"
+            )
     log.info(f"Default bill type updated for shop {shop_id} → {bill_type}")
 
 
@@ -209,6 +214,11 @@ def update_shop_gstin(phone: str, gstin: str) -> None:
         shop = session.query(Shop).filter_by(shop_id=shop_id).first()
         if shop:
             shop.gstin = gstin
+        else:
+            log.warning(
+                f"update_shop_gstin: no Shop row found for "
+                f"phone={phone[-4:]} — gstin not saved"
+            )
 
     log.info(f"GSTIN updated for shop {shop_id} → {gstin}")
 

@@ -1999,3 +1999,171 @@ class TestUpdateShopGstin:
         # After update, effective GSTIN is the real one — not the placeholder
         assert effective_gstin == gstin
         assert effective_gstin != PLACEHOLDER_GSTIN
+
+
+class TestPendingBillReminder:
+    """Tests for _with_pending_reminder stale-snapshot and expiry-drift bugs."""
+
+    @staticmethod
+    def _make_ctx(phone: str, pending_bill_dict=None):
+        from conversation.context import ShopContext
+        return ShopContext(
+            phone=phone,
+            shop_name="Test Shop",
+            owner_name="Test",
+            shop_type="general",
+            state="Telangana",
+            state_code="36",
+            gstin="",
+            default_pricing="exclusive",
+            language="en",
+            conversation_history="",
+            pending_bill=pending_bill_dict,
+            pending_bill_age_mins=0,
+            last_bill=None,
+            top_items=[],
+            frequent_customers=[],
+            bills_today=0,
+            total_bills=5,
+            is_new_user=False,
+            is_power_user=False,
+            trial_active=True,
+            trial_days_left=9,
+        )
+
+    @staticmethod
+    def _make_pending(phone: str, items=None, created_at=None):
+        from services.pending import PendingBill
+        from datetime import datetime
+        if items is None:
+            items = [{"name": "charger", "qty": 1, "price": 299}]
+        if created_at is None:
+            created_at = datetime.utcnow()
+        return PendingBill(
+            phone=phone,
+            shop_id="S00000099",
+            shop_name="Test Shop",
+            shop_state="Telangana",
+            shop_state_code="36",
+            customer_name="Customer",
+            customer_state="Telangana",
+            customer_state_code="36",
+            items=items,
+            confidence=0.9,
+            warnings=[],
+            raw_message="charger 299",
+            created_at=created_at,
+        )
+
+    def test_no_reminder_when_bill_cleared_before_handler_runs(self):
+        """_with_pending_reminder must not show reminder when bill was cleared from DB.
+
+        Root cause: stale ctx.pending_bill snapshot. The old code read ctx.pending_bill
+        (captured at request start) instead of the live DB state. If a concurrent
+        worker clears the bill between context-load and handler execution, the user
+        still sees "bill is still waiting" — then says YES and gets "no pending bill".
+        """
+        from database import init_database
+        from services.pending import store_pending, clear_pending
+        from conversation.executor import _with_pending_reminder
+
+        init_database()
+        phone = "whatsapp:+919000000099"
+        pending = self._make_pending(phone)
+        store_pending(phone, pending)
+
+        # Snapshot ctx as load_shop_context does at request start
+        pending_dict = {
+            "items": pending.items, "item_count": 1,
+            "customer_name": "Customer", "customer_phone": "",
+            "discount_type": "none", "discount_value": 0.0,
+            "pricing_type": "exclusive", "bill_type": "tax_invoice",
+        }
+        ctx = self._make_ctx(phone, pending_bill_dict=pending_dict)
+
+        # Bill is cleared from DB (concurrent worker confirmed or cancelled it)
+        clear_pending(phone)
+
+        # Must return plain reply — no stale reminder for a bill that no longer exists
+        result = _with_pending_reminder("GSTIN saved.", ctx)
+        assert "still open" not in result, (
+            "Stale ctx.pending_bill snapshot caused a ghost reminder for a deleted bill"
+        )
+        assert result == "GSTIN saved."
+
+    def test_reminder_refreshes_expiry(self):
+        """_with_pending_reminder must refresh bill expiry so 'YES' one second later works.
+
+        Root cause: expiry drift. Non-mutating handlers (settings, questions) appended
+        "bill is still waiting" without resetting the 10-minute expiry timer. If a bill
+        was ~10 minutes old, cleanup_expired_pending() on the very next request would
+        delete it — so the user's YES response always found no pending bill.
+        """
+        from datetime import datetime, timedelta
+        from database import init_database, PendingBillRecord, db_session
+        from services.pending import store_pending, PENDING_EXPIRY_MINUTES
+        from conversation.executor import _with_pending_reminder
+
+        init_database()
+        phone = "whatsapp:+919000000098"
+
+        # Bill created 9 min 50 sec ago — expires in ~10 seconds
+        old_created_at = datetime.utcnow() - timedelta(minutes=9, seconds=50)
+        pending = self._make_pending(phone, created_at=old_created_at)
+        store_pending(phone, pending)
+
+        with db_session() as s:
+            row = s.query(PendingBillRecord).filter_by(phone=phone).first()
+            assert row is not None
+            seconds_left = (row.expires_at - datetime.utcnow()).total_seconds()
+            assert 0 < seconds_left < 30, f"Expected nearly-expired bill, got {seconds_left:.1f}s"
+
+        pending_dict = {
+            "items": pending.items, "item_count": 1,
+            "customer_name": "Customer", "customer_phone": "",
+            "discount_type": "none", "discount_value": 0.0,
+            "pricing_type": "exclusive", "bill_type": "tax_invoice",
+        }
+        ctx = self._make_ctx(phone, pending_bill_dict=pending_dict)
+
+        result = _with_pending_reminder("Your GST is updated.", ctx)
+
+        # Reminder must be shown (bill not expired yet at time of call)
+        assert "still open" in result, "Expected pending-bill reminder in reply"
+
+        # Expiry must be refreshed to ~now + 10 min
+        with db_session() as s:
+            row = s.query(PendingBillRecord).filter_by(phone=phone).first()
+            assert row is not None, "Pending bill was deleted — expiry refresh must preserve it"
+            minutes_left = (row.expires_at - datetime.utcnow()).total_seconds() / 60
+            assert minutes_left > PENDING_EXPIRY_MINUTES - 1, (
+                f"Expected expiry ~{PENDING_EXPIRY_MINUTES}min after reminder, "
+                f"got {minutes_left:.1f}min — expiry was not refreshed"
+            )
+
+    def test_reminder_appended_for_active_bill(self):
+        """Happy path: active bill with items gets reminder text appended."""
+        from database import init_database
+        from services.pending import store_pending
+        from conversation.executor import _with_pending_reminder
+
+        init_database()
+        phone = "whatsapp:+919000000097"
+        items = [
+            {"name": "charger", "qty": 1, "price": 299},
+            {"name": "cover", "qty": 2, "price": 99},
+        ]
+        pending = self._make_pending(phone, items=items)
+        store_pending(phone, pending)
+
+        pending_dict = {
+            "items": items, "item_count": 2,
+            "customer_name": "Customer", "customer_phone": "",
+            "discount_type": "none", "discount_value": 0.0,
+            "pricing_type": "exclusive", "bill_type": "tax_invoice",
+        }
+        ctx = self._make_ctx(phone, pending_bill_dict=pending_dict)
+
+        result = _with_pending_reminder("GSTIN saved.", ctx)
+        assert "2 item" in result, f"Expected '2 items' in reminder, got: {result!r}"
+        assert "YES" in result, f"Expected YES in reminder, got: {result!r}"

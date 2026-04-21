@@ -179,6 +179,7 @@ _JSON_SCHEMA = """\
     },
     "set_pricing_type": "inclusive|exclusive|null",
     "set_bill_type": "tax_invoice|bill_of_supply|null",
+    "set_gstin": "15-char GSTIN string or null",
     "load_last_bill": false
   },
   "reply": "exact WhatsApp message to send — max 6 lines, no markdown headers",
@@ -554,8 +555,14 @@ ACTION: settings
 User wants to change a shop-level setting.
 
   EN : "change default to inclusive"  |  "save inclusive as default"
-  TE : "default inclusive cheyyandi"
-  HI : "default inclusive karo"  |  "UPI number add karo"
+       "my GSTIN is 36AABCU9603R1ZX"  |  "add my GST number 29ABCDE1234F1Z5"
+  TE : "default inclusive cheyyandi"  |  "maa GSTIN 36AABCU9603R1ZX"
+  HI : "default inclusive karo"  |  "mera GSTIN 36AABCU9603R1ZX hai"
+
+When the user provides a GSTIN number (15-char alphanumeric):
+  → set action=settings
+  → extract the GSTIN into bill_changes.set_gstin
+  → set reply to confirm the GSTIN was received and bills will now be Tax Invoices
 
 ────────────────────────────────────────────────────
 ACTION: unknown

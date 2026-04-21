@@ -172,6 +172,28 @@ def is_valid_gstin(gstin: str) -> bool:
     return bool(GSTIN_REGEX.match(gstin.upper().strip()))
 
 
+def update_shop_gstin(phone: str, gstin: str) -> None:
+    """Persist a new GSTIN to both Registration and Shop tables.
+
+    Called when an existing (Bill of Supply) shop registers their GSTIN
+    mid-session. Updates both tables atomically so the next
+    load_shop_context() sees the real GSTIN instead of the placeholder.
+    """
+    shop_id = "S" + re.sub(r"\D", "", phone)[-8:]
+    gstin = gstin.upper().strip()
+
+    # Registration table: store real GSTIN and flip invoice_type
+    upsert_registration(phone, gstin=gstin, invoice_type="TAX_INVOICE")
+
+    # Shop table: replace placeholder with real GSTIN
+    with db_session() as session:
+        shop = session.query(Shop).filter_by(shop_id=shop_id).first()
+        if shop:
+            shop.gstin = gstin
+
+    log.info(f"GSTIN updated for shop {shop_id} → {gstin}")
+
+
 # ════════════════════════════════════════════════
 # INDIAN STATES (GST state codes)
 # ════════════════════════════════════════════════

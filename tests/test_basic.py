@@ -1945,3 +1945,57 @@ class TestPhoneInInvoiceOutput:
         # for "9876543210". The contract we care about here is that the
         # renderer accepted customer.phone without raising.
         assert isinstance(pdf_bytes, bytes) and len(pdf_bytes) > 500
+
+
+class TestUpdateShopGstin:
+    """Regression test: GSTIN registered mid-conversation must persist to both tables."""
+
+    def test_update_shop_gstin_persists_to_both_tables(self):
+        from database import db_session, Registration, Shop, init_database
+        from services.registration import update_shop_gstin, activate_trial
+
+        init_database()
+        phone = "whatsapp:+919000000042"
+        shop_id = "S00000042"  # last 8 digits of "919000000042"
+        gstin = "36AABCU9603R1ZX"
+
+        # Start with a Bill-of-Supply shop (no GSTIN)
+        activate_trial(phone, "Test GSTIN Shop", "Hyderabad", gstin="",
+                       state_name="Telangana", state_code="36")
+
+        with db_session() as s:
+            reg = s.query(Registration).filter_by(phone=phone).first()
+            assert reg.gstin == "" or reg.gstin is None
+            shop = s.query(Shop).filter_by(shop_id=shop_id).first()
+            assert shop is not None
+
+        # Register GSTIN mid-session
+        update_shop_gstin(phone, gstin)
+
+        with db_session() as s:
+            reg = s.query(Registration).filter_by(phone=phone).first()
+            assert reg.gstin == gstin
+            assert reg.invoice_type == "TAX_INVOICE"
+            shop = s.query(Shop).filter_by(shop_id=shop_id).first()
+            assert shop.gstin == gstin
+
+    def test_update_shop_gstin_context_shows_has_gstin(self):
+        from database import db_session, Registration, Shop, init_database
+        from services.registration import update_shop_gstin, activate_trial
+        from bill_generator import PLACEHOLDER_GSTIN
+
+        init_database()
+        phone = "whatsapp:+919000000043"
+        gstin = "29GGGGG1314R9Z6"
+
+        activate_trial(phone, "Test Context Shop", "Bangalore", gstin="",
+                       state_name="Karnataka", state_code="29")
+        update_shop_gstin(phone, gstin)
+
+        from database import db_session, Registration, Shop
+        with db_session() as s:
+            reg = s.query(Registration).filter_by(phone=phone).first()
+            effective_gstin = reg.gstin or ""
+        # After update, effective GSTIN is the real one — not the placeholder
+        assert effective_gstin == gstin
+        assert effective_gstin != PLACEHOLDER_GSTIN

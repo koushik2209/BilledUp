@@ -27,7 +27,11 @@ from typing import Optional
 
 from services.pending import get_pending_bill, clear_pending, store_pending
 from services.billing import msg_preview, msg_today_summary, msg_history
-from services.registration import get_shop_id as _derive_shop_id
+from services.registration import (
+    get_shop_id as _derive_shop_id,
+    is_valid_gstin,
+    update_shop_gstin,
+)
 from db.item_master import get_top_items
 
 from conversation.context import ShopContext, load_shop_context
@@ -244,6 +248,19 @@ def _check_hard_command(
     if t in ("hi", "hello", "hai", "start", "hey"):
         return execute_action(_validate_result({"action": "help"}), phone, ctx)
 
+    # ── Bare GSTIN input (user sends just the 15-char number) ────────────
+    # Handle without LLM: GSTIN format is machine-checkable and this write
+    # must reach the DB — we cannot risk the LLM misclassifying it.
+    gstin_candidate = t_raw.strip().upper()
+    if is_valid_gstin(gstin_candidate):
+        return execute_action(
+            _validate_result({
+                "action":       "settings",
+                "bill_changes": {"set_gstin": gstin_candidate},
+            }),
+            phone, ctx,
+        )
+
     return None   # Not a hard command — forward to LLM
 
 
@@ -432,6 +449,10 @@ def _validate_result(result: dict) -> dict:
     # set_bill_type — "tax_invoice" | "bill_of_supply" | None
     sbt = str(bc.get("set_bill_type") or "").lower().strip()
     bc["set_bill_type"] = sbt if sbt in ("tax_invoice", "bill_of_supply") else None
+
+    # set_gstin — 15-char validated GSTIN string | None
+    sg = str(bc.get("set_gstin") or "").upper().strip()
+    bc["set_gstin"] = sg if sg and is_valid_gstin(sg) else None
 
     # load_last_bill — bool
     bc["load_last_bill"] = bool(bc.get("load_last_bill", False))

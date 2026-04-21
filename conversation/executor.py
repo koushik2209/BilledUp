@@ -28,7 +28,10 @@ from services.billing import (
     _handle_gst_report,
     msg_preview,
 )
-from services.registration import get_registration, get_shop_id as _derive_shop_id
+from services.registration import (
+    get_registration, get_shop_id as _derive_shop_id,
+    update_shop_gstin,
+)
 from conversation.context import ShopContext
 
 log = logging.getLogger("billedup.conversation.executor")
@@ -108,7 +111,12 @@ def execute_action(result: dict, phone: str, ctx: ShopContext) -> str:
             return _handle_complaint(phone, reply, ctx)
         if action == "help":
             return _handle_help(ctx, reply)
-        if action in ("greeting", "question", "settings", "unknown"):
+        if action == "settings":
+            set_gstin = bill_changes.get("set_gstin")
+            if set_gstin:
+                return _handle_set_gstin(phone, set_gstin, ctx, reply)
+            return _with_pending_reminder(reply or _get_fallback_reply(ctx), ctx)
+        if action in ("greeting", "question", "unknown"):
             r = reply or _get_fallback_reply(ctx)
             return _with_pending_reminder(r, ctx)
         # Fallthrough — unknown action
@@ -639,6 +647,36 @@ def _handle_set_pricing(
     except Exception as exc:
         log.error(f"_handle_set_pricing failed for {phone}: {exc}", exc_info=True)
         return _get_fallback_reply(ctx)
+
+
+def _handle_set_gstin(
+    phone: str,
+    gstin: str,
+    ctx: ShopContext,
+    reply: str,
+) -> str:
+    """Persist a new GSTIN to both Registration and Shop tables.
+
+    This is the only correct path for GSTIN updates — the settings action
+    previously had no DB write, so context.load_shop_context() kept reading
+    the placeholder and _is_bill_of_supply() always returned True.
+    """
+    try:
+        update_shop_gstin(phone, gstin)
+        log.info(f"{phone}: GSTIN updated → {gstin}")
+        msg = (
+            f"✅ GSTIN *{gstin}* registered!\n\n"
+            "Your next bill will be a *Tax Invoice* with full GST breakdown.\n"
+            "_Send items any time to create your first Tax Invoice._"
+        )
+        # Append pending-bill reminder if a bill was already in progress
+        pending = get_pending_bill(phone)
+        if pending:
+            return _with_pending_reminder(msg, ctx)
+        return msg
+    except Exception as exc:
+        log.error(f"_handle_set_gstin failed for {phone}: {exc}", exc_info=True)
+        return "❌ Could not save GSTIN. Please try again or contact support."
 
 
 def _handle_set_bill_type(

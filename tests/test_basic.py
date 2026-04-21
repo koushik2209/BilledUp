@@ -2016,6 +2016,7 @@ class TestPendingBillReminder:
             state_code="36",
             gstin="",
             default_pricing="exclusive",
+            default_bill_type="",
             language="en",
             conversation_history="",
             pending_bill=pending_bill_dict,
@@ -2210,3 +2211,218 @@ class TestPendingBillReminder:
         result = _with_pending_reminder("GSTIN saved.", ctx)
         assert "2 item" in result, f"Expected '2 items' in reminder, got: {result!r}"
         assert "YES" in result, f"Expected YES in reminder, got: {result!r}"
+
+
+class TestDefaultBillType:
+    """Tests for persistent default_bill_type shop preference."""
+
+    @staticmethod
+    def _make_ctx(phone: str, gstin: str = "", default_bill_type: str = ""):
+        from conversation.context import ShopContext
+        return ShopContext(
+            phone=phone,
+            shop_name="Test Shop",
+            owner_name="Test",
+            shop_type="general",
+            state="Telangana",
+            state_code="36",
+            gstin=gstin,
+            default_pricing="exclusive",
+            default_bill_type=default_bill_type,
+            language="en",
+            conversation_history="",
+            pending_bill=None,
+            pending_bill_age_mins=0,
+            last_bill=None,
+            top_items=[],
+            frequent_customers=[],
+            bills_today=0,
+            total_bills=5,
+            is_new_user=False,
+            is_power_user=False,
+            trial_active=True,
+            trial_days_left=9,
+        )
+
+    # ── _is_bill_of_supply precedence ──────────────────────────────────
+
+    def test_is_bos_false_when_default_bill_type_is_tax_invoice(self):
+        """explicit tax_invoice overrides missing GSTIN (fallback would be True)."""
+        from conversation.executor import _is_bill_of_supply
+        ctx = self._make_ctx("whatsapp:+910000000001", gstin="", default_bill_type="tax_invoice")
+        assert _is_bill_of_supply(ctx) is False
+
+    def test_is_bos_true_when_default_bill_type_is_bill_of_supply(self):
+        """explicit bill_of_supply overrides valid GSTIN (fallback would be False)."""
+        from conversation.executor import _is_bill_of_supply
+        ctx = self._make_ctx(
+            "whatsapp:+910000000002",
+            gstin="36AABCU9603R1ZX",
+            default_bill_type="bill_of_supply",
+        )
+        assert _is_bill_of_supply(ctx) is True
+
+    def test_is_bos_falls_back_to_gstin_when_no_preference(self):
+        """No preference saved → derive from GSTIN as before."""
+        from conversation.executor import _is_bill_of_supply
+        ctx_no_gstin = self._make_ctx("whatsapp:+910000000003", gstin="", default_bill_type="")
+        ctx_has_gstin = self._make_ctx(
+            "whatsapp:+910000000004", gstin="29ABCDE1234F1Z5", default_bill_type=""
+        )
+        assert _is_bill_of_supply(ctx_no_gstin) is True
+        assert _is_bill_of_supply(ctx_has_gstin) is False
+
+    # ── update_shop_default_bill_type persistence ───────────────────────
+
+    def test_update_shop_default_bill_type_persists(self):
+        """update_shop_default_bill_type writes to Shop table and can be read back."""
+        from database import init_database, db_session
+        from db.models import Shop
+        from services.registration import activate_trial, update_shop_default_bill_type
+
+        init_database()
+        phone = "whatsapp:+919000000091"
+
+        activate_trial(phone, "DBT Test Shop", "Hyderabad", gstin="",
+                       state_name="Telangana", state_code="36")
+
+        update_shop_default_bill_type(phone, "bill_of_supply")
+
+        shop_id = "S" + "919000000091"[-8:]
+        with db_session() as s:
+            shop = s.query(Shop).filter_by(shop_id=shop_id).first()
+            assert shop is not None
+            assert shop.default_bill_type == "bill_of_supply"
+
+        update_shop_default_bill_type(phone, "tax_invoice")
+        with db_session() as s:
+            shop = s.query(Shop).filter_by(shop_id=shop_id).first()
+            assert shop.default_bill_type == "tax_invoice"
+
+    def test_load_shop_context_reads_default_bill_type(self):
+        """load_shop_context propagates default_bill_type from Shop into ctx."""
+        from database import init_database
+        from services.registration import activate_trial, update_shop_default_bill_type
+        from conversation.context import load_shop_context
+
+        init_database()
+        phone = "whatsapp:+919000000092"
+        activate_trial(phone, "CTX DBT Shop", "Hyderabad", gstin="",
+                       state_name="Telangana", state_code="36")
+
+        # Default is None/empty after creation
+        ctx = load_shop_context(phone)
+        assert ctx.default_bill_type == ""
+
+        update_shop_default_bill_type(phone, "bill_of_supply")
+        ctx = load_shop_context(phone)
+        assert ctx.default_bill_type == "bill_of_supply"
+
+    # ── _handle_set_default_bill_type reply ─────────────────────────────
+
+    def test_handle_set_default_bill_type_returns_confirmation(self):
+        """_handle_set_default_bill_type writes to DB and returns a confirmation."""
+        from database import init_database, db_session
+        from db.models import Shop
+        from services.registration import activate_trial
+        from conversation.executor import _handle_set_default_bill_type
+
+        init_database()
+        phone = "whatsapp:+919000000093"
+        activate_trial(phone, "Reply Test Shop", "Hyderabad", gstin="",
+                       state_name="Telangana", state_code="36")
+
+        ctx = self._make_ctx(phone)
+        result = _handle_set_default_bill_type(phone, "bill_of_supply", ctx, "")
+
+        assert "Bill of Supply" in result
+        assert "future bills" in result.lower() or "default" in result.lower()
+
+        shop_id = "S" + "919000000093"[-8:]
+        with db_session() as s:
+            shop = s.query(Shop).filter_by(shop_id=shop_id).first()
+            assert shop.default_bill_type == "bill_of_supply"
+
+    # ── _handle_billing respects default_bill_type ──────────────────────
+
+    def test_new_bill_uses_default_bill_type_bill_of_supply(self):
+        """When default_bill_type is 'bill_of_supply', new pending bill is BOS."""
+        from database import init_database
+        from services.registration import activate_trial
+        from services.pending import get_pending_bill, clear_pending
+        from conversation.executor import _handle_billing
+
+        init_database()
+        phone = "whatsapp:+919000000094"
+        activate_trial(phone, "BOS Default Shop", "Hyderabad", gstin="",
+                       state_name="Telangana", state_code="36")
+        clear_pending(phone)
+
+        # Context with explicit bill_of_supply preference
+        ctx = self._make_ctx(phone, gstin="", default_bill_type="bill_of_supply")
+
+        bill_changes = {"add_items": [{"name": "shirt", "qty": 1, "price": 500}]}
+        _handle_billing(phone, bill_changes, ctx, "", show_preview=False)
+
+        pending = get_pending_bill(phone)
+        assert pending is not None, "Expected a pending bill to be created"
+        assert pending.is_bill_of_supply is True, (
+            "Expected is_bill_of_supply=True because default_bill_type='bill_of_supply'"
+        )
+
+    def test_new_bill_is_tax_invoice_when_default_is_tax_invoice(self):
+        """When default_bill_type is 'tax_invoice', new pending bill has GST."""
+        from database import init_database
+        from services.registration import activate_trial
+        from services.pending import get_pending_bill, clear_pending
+        from conversation.executor import _handle_billing
+
+        init_database()
+        phone = "whatsapp:+919000000095"
+        # Shop has no GSTIN — without the preference it would default to BOS
+        activate_trial(phone, "TI Default Shop", "Hyderabad", gstin="",
+                       state_name="Telangana", state_code="36")
+        clear_pending(phone)
+
+        # Explicit tax_invoice preference overrides the missing-GSTIN fallback
+        ctx = self._make_ctx(phone, gstin="", default_bill_type="tax_invoice")
+
+        bill_changes = {"add_items": [{"name": "shirt", "qty": 1, "price": 500}]}
+        _handle_billing(phone, bill_changes, ctx, "", show_preview=False)
+
+        pending = get_pending_bill(phone)
+        assert pending is not None
+        assert pending.is_bill_of_supply is False, (
+            "Expected is_bill_of_supply=False because default_bill_type='tax_invoice'"
+        )
+
+    # ── Per-message override still works ────────────────────────────────
+
+    def test_per_bill_override_beats_default(self):
+        """set_bill_type in bill_changes overrides the shop default for that bill."""
+        from database import init_database
+        from services.registration import activate_trial
+        from services.pending import get_pending_bill, clear_pending
+        from conversation.executor import _handle_billing
+
+        init_database()
+        phone = "whatsapp:+919000000090"
+        activate_trial(phone, "Override Test Shop", "Hyderabad", gstin="36AABCU9603R1ZX",
+                       state_name="Telangana", state_code="36")
+        clear_pending(phone)
+
+        # Shop default would normally be tax_invoice (has GSTIN)
+        # but a per-message "bill_of_supply" override takes highest precedence
+        ctx = self._make_ctx(phone, gstin="36AABCU9603R1ZX", default_bill_type="tax_invoice")
+
+        bill_changes = {
+            "add_items": [{"name": "shirt", "qty": 1, "price": 500}],
+            "set_bill_type": "bill_of_supply",
+        }
+        _handle_billing(phone, bill_changes, ctx, "", show_preview=False)
+
+        pending = get_pending_bill(phone)
+        assert pending is not None
+        assert pending.is_bill_of_supply is True, (
+            "Per-message set_bill_type='bill_of_supply' must override default_bill_type"
+        )

@@ -71,7 +71,8 @@ _REQUIRED_SCHEMA = {
                            "pricing_type"],
     "registrations":      ["invoice_type", "state_name", "state_code"],
     "conversation_log":   ["phone", "direction", "message"],
-    "shops":              ["api_key", "state", "state_code", "upi", "default_pricing"],
+    "shops":              ["api_key", "state", "state_code", "upi", "default_pricing",
+                          "default_bill_type"],
 }
 
 

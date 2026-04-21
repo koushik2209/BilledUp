@@ -172,6 +172,21 @@ def is_valid_gstin(gstin: str) -> bool:
     return bool(GSTIN_REGEX.match(gstin.upper().strip()))
 
 
+def update_shop_default_bill_type(phone: str, bill_type: str) -> None:
+    """Persist default_bill_type preference to the Shop table.
+
+    Called when the owner says 'always bill of supply' / 'always tax invoice'.
+    The value is read by load_shop_context and stored in ctx.default_bill_type
+    so _is_bill_of_supply() can respect it without a GSTIN check.
+    """
+    shop_id = "S" + re.sub(r"\D", "", phone)[-8:]
+    with db_session() as session:
+        shop = session.query(Shop).filter_by(shop_id=shop_id).first()
+        if shop:
+            shop.default_bill_type = bill_type
+    log.info(f"Default bill type updated for shop {shop_id} → {bill_type}")
+
+
 def update_shop_gstin(phone: str, gstin: str) -> None:
     """Persist a new GSTIN to both Registration and Shop tables.
 

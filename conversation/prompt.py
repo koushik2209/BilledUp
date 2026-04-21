@@ -179,6 +179,7 @@ _JSON_SCHEMA = """\
     },
     "set_pricing_type": "inclusive|exclusive|null",
     "set_bill_type": "tax_invoice|bill_of_supply|null",
+    "set_default_bill_type": "tax_invoice|bill_of_supply|null",
     "set_gstin": "15-char GSTIN string or null",
     "load_last_bill": false
   },
@@ -264,6 +265,7 @@ def _section_shop_context(ctx: ShopContext) -> str:
         f"State        : {ctx.state or 'Unknown'} (code: {ctx.state_code or '?'})\n"
         f"GSTIN        : {gstin_display}\n"
         f"Default GST  : {ctx.default_pricing} pricing\n"
+        f"Default Bill : {ctx.default_bill_type or 'auto (derived from GSTIN)'}\n"
         f"Bills Today  : {ctx.bills_today}\n"
         f"Total Bills  : {ctx.total_bills}"
         f"{trial_line}"
@@ -556,13 +558,24 @@ User wants to change a shop-level setting.
 
   EN : "change default to inclusive"  |  "save inclusive as default"
        "my GSTIN is 36AABCU9603R1ZX"  |  "add my GST number 29ABCDE1234F1Z5"
+       "always bill of supply"  |  "default bill of supply"  |  "no gst bills"
+       "always tax invoice"  |  "with gst always"  |  "reset to gst"
   TE : "default inclusive cheyyandi"  |  "maa GSTIN 36AABCU9603R1ZX"
+       "anni bills bill of supply ga cheyyandi"
   HI : "default inclusive karo"  |  "mera GSTIN 36AABCU9603R1ZX hai"
+       "hamesha bill of supply karo"  |  "gst nahi hamesha"
 
 When the user provides a GSTIN number (15-char alphanumeric):
   → set action=settings
   → extract the GSTIN into bill_changes.set_gstin
   → set reply to confirm the GSTIN was received and bills will now be Tax Invoices
+
+When the user wants to set a PERMANENT default bill type ("always", "default", "hamesha"):
+  → set action=settings
+  → set bill_changes.set_default_bill_type = "bill_of_supply" or "tax_invoice"
+  → DO NOT use set_bill_type (that only changes the current pending bill)
+  → Distinguish from per-bill override: "for this bill use bos" → set_bill_type
+    "always use bos" / "default bos" / "no gst bills" → set_default_bill_type
 
 ────────────────────────────────────────────────────
 ACTION: unknown
@@ -672,7 +685,8 @@ def _section_json_format() -> str:
         "set_discount.type : 'percent' | 'flat' | 'override' | null\n"
         "set_discount.value: number — percent 0-100, flat in ₹, override = final total ₹\n"
         "set_pricing_type  : 'inclusive' | 'exclusive' | null\n"
-        "set_bill_type     : 'tax_invoice' | 'bill_of_supply' | null\n"
+        "set_bill_type         : 'tax_invoice' | 'bill_of_supply' | null  (current bill only)\n"
+        "set_default_bill_type : 'tax_invoice' | 'bill_of_supply' | null  (saved shop default)\n"
         "load_last_bill    : true only for 'same as last bill' variants\n"
         "reply             : exact WhatsApp message, max 6 lines, no markdown headers\n"
         "show_preview      : true when bill preview must be shown after execution\n"

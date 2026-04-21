@@ -30,7 +30,7 @@ from services.billing import (
 )
 from services.registration import (
     get_registration, get_shop_id as _derive_shop_id,
-    update_shop_gstin,
+    update_shop_gstin, update_shop_default_bill_type,
 )
 from conversation.context import ShopContext
 
@@ -115,6 +115,9 @@ def execute_action(result: dict, phone: str, ctx: ShopContext) -> str:
             set_gstin = bill_changes.get("set_gstin")
             if set_gstin:
                 return _handle_set_gstin(phone, set_gstin, ctx, reply)
+            set_dbt = bill_changes.get("set_default_bill_type")
+            if set_dbt:
+                return _handle_set_default_bill_type(phone, set_dbt, ctx, reply)
             return _with_pending_reminder(reply or _get_fallback_reply(ctx), ctx)
         if action in ("greeting", "question", "unknown"):
             r = reply or _get_fallback_reply(ctx)
@@ -675,6 +678,39 @@ def _handle_set_gstin(
         return "❌ Could not save GSTIN. Please try again or contact support."
 
 
+def _handle_set_default_bill_type(
+    phone: str,
+    bill_type: str,
+    ctx: ShopContext,
+    reply: str,
+) -> str:
+    """Persist a permanent default bill type preference to the Shop table.
+
+    Called when the owner says 'always bill of supply', 'no gst bills', etc.
+    Unlike _handle_set_bill_type (which edits the current pending bill only),
+    this writes to the Shop record so every future bill starts with this default.
+    """
+    try:
+        update_shop_default_bill_type(phone, bill_type)
+        log.info(f"{phone}: default_bill_type → {bill_type}")
+        if bill_type == "bill_of_supply":
+            msg = (
+                "✅ Default set to *Bill of Supply* (no GST).\n\n"
+                "_All future bills will be Bill of Supply. "
+                "You can still switch a specific bill to Tax Invoice by saying 'with gst'._"
+            )
+        else:
+            msg = (
+                "✅ Default set to *Tax Invoice* (with GST).\n\n"
+                "_All future bills will be Tax Invoice. "
+                "You can still switch a specific bill to Bill of Supply by saying 'no gst'._"
+            )
+        return _with_pending_reminder(msg, ctx)
+    except Exception as exc:
+        log.error(f"_handle_set_default_bill_type failed for {phone}: {exc}", exc_info=True)
+        return "❌ Could not save preference. Please try again."
+
+
 def _handle_set_bill_type(
     phone: str,
     bill_changes: dict,
@@ -1014,7 +1050,17 @@ def _pending_age_mins(pending: PendingBill) -> int:
 
 
 def _is_bill_of_supply(ctx: ShopContext) -> bool:
-    """True if the shop has no valid GSTIN (Bill of Supply shop)."""
+    """True if the shop defaults to Bill of Supply (no GST).
+
+    Precedence:
+    1. ctx.default_bill_type ("bill_of_supply" / "tax_invoice") — explicit shop preference
+    2. GSTIN presence — derived fallback when no preference is saved
+    """
+    dbt = (ctx.default_bill_type or "").lower()
+    if dbt == "bill_of_supply":
+        return True
+    if dbt == "tax_invoice":
+        return False
     gstin = ctx.gstin or ""
     return not gstin or gstin == _PLACEHOLDER_GSTIN
 

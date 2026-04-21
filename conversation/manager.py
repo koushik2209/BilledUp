@@ -446,9 +446,13 @@ def _validate_result(result: dict) -> dict:
     spt = str(bc.get("set_pricing_type") or "").lower().strip()
     bc["set_pricing_type"] = spt if spt in ("inclusive", "exclusive") else None
 
-    # set_bill_type — "tax_invoice" | "bill_of_supply" | None
+    # set_bill_type — "tax_invoice" | "bill_of_supply" | None  (per-bill override)
     sbt = str(bc.get("set_bill_type") or "").lower().strip()
     bc["set_bill_type"] = sbt if sbt in ("tax_invoice", "bill_of_supply") else None
+
+    # set_default_bill_type — "tax_invoice" | "bill_of_supply" | None  (persistent shop default)
+    sdbt = str(bc.get("set_default_bill_type") or "").lower().strip()
+    bc["set_default_bill_type"] = sdbt if sdbt in ("tax_invoice", "bill_of_supply") else None
 
     # set_gstin — 15-char validated GSTIN string | None
     sg = str(bc.get("set_gstin") or "").upper().strip()

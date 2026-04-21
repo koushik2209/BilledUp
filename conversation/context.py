@@ -36,6 +36,7 @@ class ShopContext:
     state_code: str
     gstin: str
     default_pricing: str        # inclusive / exclusive
+    default_bill_type: str      # "tax_invoice" | "bill_of_supply" | "" (falls back to GSTIN check)
     language: str               # en / hi / te
     conversation_history: str   # last 8 msgs as "Shopkeeper: …\nBilledUp: …"
     pending_bill: Optional[dict]
@@ -82,7 +83,8 @@ def load_shop_context(phone: str) -> "ShopContext":
             gstin           = (reg.gstin or (shop.gstin if shop else None) or "").strip()
             state           = (reg.state_name or (shop.state if shop else None) or "").strip()
             state_code      = (reg.state_code or (shop.state_code if shop else None) or "").strip()
-            default_pricing = ((shop.default_pricing if shop else None) or "exclusive").strip()
+            default_pricing   = ((shop.default_pricing   if shop else None) or "exclusive").strip()
+            default_bill_type = ((shop.default_bill_type if shop else None) or "").strip()
 
             history            = _load_history(session, phone)
             last_bill          = _load_last_bill(session, shop_id)
@@ -129,6 +131,7 @@ def load_shop_context(phone: str) -> "ShopContext":
                 state_code           = state_code,
                 gstin                = gstin,
                 default_pricing      = default_pricing,
+                default_bill_type    = default_bill_type,
                 language             = language,
                 conversation_history = history,
                 pending_bill         = pending_dict,
@@ -505,6 +508,7 @@ def _unregistered_context(phone: str) -> ShopContext:
         state_code           = "",
         gstin                = "",
         default_pricing      = "exclusive",
+        default_bill_type    = "",
         language             = "en",
         conversation_history = "",
         pending_bill         = None,

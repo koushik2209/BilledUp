@@ -40,6 +40,7 @@ _PENDING_EXPIRY_MINS = 10
 _FUZZY_REMOVE_THRESH = 70
 _FUZZY_UPDATE_THRESH = 60
 _PLACEHOLDER_GSTIN   = "GSTIN00000000000"
+_STATE_NAME_TO_CODE: dict[str, str] = {v: k for k, v in INDIAN_STATES.items()}
 
 
 def _resolve_customer_state(raw: str) -> tuple[str, str] | None:
@@ -57,9 +58,9 @@ def _resolve_customer_state(raw: str) -> tuple[str, str] | None:
     m = fuzz_process.extractOne(raw, list(INDIAN_STATES.values()),
                                 scorer=fuzz.WRatio, score_cutoff=70)
     if m:
-        for code, name in INDIAN_STATES.items():
-            if name == m[0]:
-                return name, code
+        code = _STATE_NAME_TO_CODE.get(m[0])
+        if code:
+            return m[0], code
     return None
 
 
@@ -697,7 +698,8 @@ def _handle_set_gstin(
     try:
         update_shop_gstin(phone, gstin)
         log.info(f"{phone}: GSTIN updated → {gstin}")
-        msg = (
+        prefix = (reply.strip() + "\n\n") if reply and reply.strip() else ""
+        msg = prefix + (
             f"✅ GSTIN *{gstin}* registered!\n\n"
             "Your next bill will be a *Tax Invoice* with full GST breakdown.\n"
             "_Send items any time to create your first Tax Invoice._"
@@ -723,14 +725,15 @@ def _handle_set_default_bill_type(
     try:
         update_shop_default_bill_type(phone, bill_type)
         log.info(f"{phone}: default_bill_type → {bill_type}")
+        prefix = (reply.strip() + "\n\n") if reply and reply.strip() else ""
         if bill_type == "bill_of_supply":
-            msg = (
+            msg = prefix + (
                 "✅ Default set to *Bill of Supply* (no GST).\n\n"
                 "_All future bills will be Bill of Supply. "
                 "You can still switch a specific bill to Tax Invoice by saying 'with gst'._"
             )
         else:
-            msg = (
+            msg = prefix + (
                 "✅ Default set to *Tax Invoice* (with GST).\n\n"
                 "_All future bills will be Tax Invoice. "
                 "You can still switch a specific bill to Bill of Supply by saying 'no gst'._"

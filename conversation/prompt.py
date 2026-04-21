@@ -716,6 +716,7 @@ def _section_json_format() -> str:
         "set_bill_type         : 'tax_invoice' | 'bill_of_supply' | null  (current bill only)\n"
         "set_default_bill_type : 'tax_invoice' | 'bill_of_supply' | null  (saved shop default)\n"
         "set_customer_state    : state name string (e.g. 'Maharashtra') or null\n"
+        "set_gstin             : string | null — new GSTIN to save for the shop\n"
         "load_last_bill    : true only for 'same as last bill' variants\n"
         "reply             : exact WhatsApp message, max 6 lines, no markdown headers\n"
         "show_preview      : true when bill preview must be shown after execution\n"

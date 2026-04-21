@@ -924,11 +924,20 @@ def _apply_bill_changes(pending: PendingBill, bill_changes: dict) -> PendingBill
     return pending
 
 
+def _pending_age_mins(pending: PendingBill) -> float:
+    """Return how many minutes ago this pending bill was created."""
+    try:
+        return (datetime.utcnow() - pending.created_at).total_seconds() / 60
+    except Exception:
+        return 0.0
+
+
 def _with_pending_reminder(reply: str, ctx: ShopContext) -> str:
     """Append a pending-bill reminder to a reply if a live pending bill exists.
 
-    Always reads fresh from DB (not the stale ctx.pending_bill snapshot) and
-    resets the 10-minute expiry so the user's YES one second later still works.
+    Always reads fresh from DB (not the stale ctx.pending_bill snapshot).
+    Only resets the 10-minute expiry when the bill is >= 8 minutes old —
+    giving a grace window for mid-flow users without making expiry indefinite.
     """
     try:
         pending = get_pending_bill(ctx.phone)
@@ -938,9 +947,10 @@ def _with_pending_reminder(reply: str, ctx: ShopContext) -> str:
         if n == 0:
             return reply
 
-        # Refresh expiry — every reminder grants the user a fresh 10-minute window
-        pending.created_at = datetime.utcnow()
-        store_pending(ctx.phone, pending)
+        # Grace reset: only extend expiry when bill is close to timing out
+        if _pending_age_mins(pending) >= 8:
+            pending.created_at = datetime.utcnow()
+            store_pending(ctx.phone, pending)
 
         lang = ctx.language or "en"
         if lang == "te":

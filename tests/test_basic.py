@@ -2141,6 +2141,49 @@ class TestPendingBillReminder:
                 f"got {minutes_left:.1f}min — expiry was not refreshed"
             )
 
+    def test_expiry_not_refreshed_for_fresh_bill(self):
+        """_with_pending_reminder must NOT refresh expiry for bills < 8 minutes old.
+
+        Resetting created_at on every reminder call makes the 10-minute expiry
+        indefinitely extendable. The grace reset should only happen when the bill
+        is actually close to expiry (>= 8 min old).
+        """
+        from datetime import datetime, timedelta
+        from database import init_database, PendingBillRecord, db_session
+        from services.pending import store_pending, PENDING_EXPIRY_MINUTES
+        from conversation.executor import _with_pending_reminder
+
+        init_database()
+        phone = "whatsapp:+919000000096"
+
+        # Bill is 2 minutes old — well within the normal window
+        created_at = datetime.utcnow() - timedelta(minutes=2)
+        pending = self._make_pending(phone, created_at=created_at)
+        store_pending(phone, pending)
+
+        pending_dict = {
+            "items": pending.items, "item_count": 1,
+            "customer_name": "Customer", "customer_phone": "",
+            "discount_type": "none", "discount_value": 0.0,
+            "pricing_type": "exclusive", "bill_type": "tax_invoice",
+        }
+        ctx = self._make_ctx(phone, pending_bill_dict=pending_dict)
+
+        result = _with_pending_reminder("Settings saved.", ctx)
+
+        # Reminder is still shown
+        assert "still open" in result, "Expected pending-bill reminder in reply"
+
+        # Expiry must NOT be extended — should be ~8 min left, not ~10 min
+        with db_session() as s:
+            row = s.query(PendingBillRecord).filter_by(phone=phone).first()
+            assert row is not None
+            minutes_left = (row.expires_at - datetime.utcnow()).total_seconds() / 60
+            assert minutes_left < PENDING_EXPIRY_MINUTES - 1, (
+                f"Expiry was reset for a fresh 2-min-old bill (got {minutes_left:.1f}min left) "
+                f"— only bills >= 8 min old should have their expiry refreshed"
+            )
+
     def test_reminder_appended_for_active_bill(self):
         """Happy path: active bill with items gets reminder text appended."""
         from database import init_database

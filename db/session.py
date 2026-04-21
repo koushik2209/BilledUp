@@ -117,16 +117,6 @@ def reset_database():
     log.warning("[DB] Resetting database — dropping all tables")
     Base.metadata.drop_all(engine)
     engine.dispose()
-
-    if DATABASE_URL.startswith("sqlite"):
-        db_path = DATABASE_URL.replace("sqlite:///", "")
-        if db_path and os.path.exists(db_path):
-            try:
-                os.remove(db_path)
-                log.info(f"[DB] Deleted SQLite file: {db_path}")
-            except OSError as e:
-                log.warning(f"[DB] Could not delete SQLite file: {e}")
-
     Base.metadata.create_all(engine)
     log.info("[DB] Database recreated from models")
 

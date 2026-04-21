@@ -1014,14 +1014,6 @@ def _apply_bill_changes(pending: PendingBill, bill_changes: dict) -> PendingBill
     return pending
 
 
-def _pending_age_mins(pending: PendingBill) -> float:
-    """Return how many minutes ago this pending bill was created."""
-    try:
-        return (datetime.utcnow() - pending.created_at).total_seconds() / 60
-    except Exception:
-        return 0.0
-
-
 def _with_pending_reminder(reply: str, ctx: ShopContext) -> str:
     """Append a pending-bill reminder to a reply if a live pending bill exists.
 

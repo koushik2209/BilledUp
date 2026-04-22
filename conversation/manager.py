@@ -234,8 +234,18 @@ def _check_hard_command(
             phone, ctx,
         )
 
-    # ── Today summary ─────────────────────────────
-    if t in ("today", "aaj", "summary", "today's sales", "aaj ka"):
+    # ── Daily summary (new format) ────────────────
+    if t == "summary":
+        import pytz
+        from services.daily_summary_service import get_daily_summary_data
+        from core.daily_summary import format_daily_summary
+        shop_id  = _derive_shop_id(phone)
+        IST      = pytz.timezone("Asia/Kolkata")
+        data     = get_daily_summary_data(shop_id, datetime.now(IST).date())
+        return format_daily_summary(data)
+
+    # ── Today summary (legacy format) ────────────
+    if t in ("today", "aaj", "today's sales", "aaj ka"):
         shop_id = _derive_shop_id(phone)
         return msg_today_summary(shop_id, ctx.shop_name, ctx.trial_days_left)
 

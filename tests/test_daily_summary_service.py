@@ -1,6 +1,6 @@
 """Tests for daily summary service and schema."""
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -201,3 +201,56 @@ def test_get_daily_summary_data_returns_amount_is_positive_for_negative_stored_v
 
     assert result["today"]["returns_amount"] == 1000.0  # positive, not -1000
     assert result["today"]["grand_total"]    == 5000.0  # sales unaffected
+
+
+def test_summary_command_uses_new_formatter(monkeypatch):
+    """summary command must call get_daily_summary_data, not msg_today_summary."""
+    main.init_database()
+    from conversation import manager as mgr
+
+    with db_session() as session:
+        from db.models import Registration
+
+        _shop(session, "S10000099", gstin="36AABCU9603R1ZX")
+
+        reg = Registration(
+            phone="919999999099",
+            shop_name="Test Shop",
+            address="Test",
+            gstin="36AABCU9603R1ZX",
+            state="ACTIVE",
+            active=True,
+            trial_start=datetime.utcnow(),
+            trial_end=datetime.utcnow() + timedelta(days=10),
+        )
+        session.add(reg)
+
+        _bill(session, "S10000099",
+              grand_total=500.0, subtotal=450.0, total_gst=50.0,
+              created_at=datetime.utcnow())
+
+    captured = {}
+
+    def _mock_get_data(shop_id, target_date):
+        captured["called"] = True
+        return {
+            "shop_name": "Test Shop",
+            "has_gstin": True,
+            "date": "22 Apr 2026",
+            "today": {"total_bills": 1, "grand_total": 500.0,
+                      "sale_amount": 450.0, "total_gst": 50.0,
+                      "returns_count": 0, "returns_amount": 0.0},
+            "month": {"name": "April", "total_bills": 1,
+                      "grand_total": 500.0, "sale_amount": 450.0,
+                      "total_gst": 50.0, "returns_count": 0,
+                      "returns_amount": 0.0},
+        }
+
+    monkeypatch.setattr(
+        "services.daily_summary_service.get_daily_summary_data",
+        _mock_get_data,
+    )
+
+    reply = mgr.handle_message("919999999099", "summary")
+    assert captured.get("called"), "get_daily_summary_data was not called"
+    assert "📊" in reply

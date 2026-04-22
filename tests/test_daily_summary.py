@@ -1,5 +1,4 @@
 """Unit tests for core.daily_summary formatter. No DB, no network."""
-import pytest
 from core.daily_summary import _fmt, format_daily_summary
 
 

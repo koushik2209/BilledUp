@@ -153,3 +153,15 @@ def test_net_total_never_negative():
         returns_count=1, returns_amount=99999.0
     ))
     assert "🏁 Net Total: ₹0" in result
+
+
+def test_zero_bills_no_extra_emojis():
+    result = format_daily_summary(_sample_data(total_bills=0))
+    assert "💪" not in result
+
+
+def test_zero_bills_gstin_shop_shows_gst_month_section():
+    result = format_daily_summary(_sample_data(has_gstin=True, total_bills=0))
+    # Month section should still show GST-formatted data
+    assert "💰 Sale Amount:" in result
+    assert "🏛 GST Collected:" in result

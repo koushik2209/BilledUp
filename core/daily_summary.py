@@ -105,12 +105,10 @@ def format_daily_summary(data: dict) -> str:
             f"📊 *Today's Summary — {date_str}*",
             "",
             "No bills today — happens sometimes.",
-            "Get ready for a stronger tomorrow. 💪",
+            "Get ready for a stronger tomorrow.",
         ]
         if month:
-            lines += _month_section(
-                month, has_gstin=False, include_sale=False, include_gst=False
-            )
+            lines += _month_section(month, has_gstin)
         return "\n".join(lines)
 
     grand_total    = float(_safe(today, "grand_total"))
@@ -164,4 +162,4 @@ def format_daily_summary(data: dict) -> str:
                 skip_sale = True
         lines += month_lines
 
-    return "\n".join(lines)
+    return "\n".join(lines[:18])

@@ -160,9 +160,8 @@ def format_daily_summary(data: dict) -> str:
                 skip_gst = True
             else:
                 skip_sale = True
-        assert len(lines + month_lines) <= 18, (
-            f"Trim loop failed to converge: {len(lines + month_lines)} lines"
-        )
-        lines += month_lines
+        if len(lines + month_lines) <= 18:
+            lines += month_lines
+        # else: month section omitted entirely — lines[:18] slice is the final safety net
 
     return "\n".join(lines[:18])

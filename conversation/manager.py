@@ -239,9 +239,12 @@ def _check_hard_command(
         import pytz
         from services.daily_summary_service import get_daily_summary_data
         from core.daily_summary import format_daily_summary
-        shop_id  = _derive_shop_id(phone)
-        IST      = pytz.timezone("Asia/Kolkata")
-        data     = get_daily_summary_data(shop_id, datetime.now(IST).date())
+        shop_id = _derive_shop_id(phone)
+        IST     = pytz.timezone("Asia/Kolkata")
+        try:
+            data = get_daily_summary_data(shop_id, datetime.now(IST).date())
+        except ValueError:
+            return "Sorry, I couldn't find your shop details. Please contact support."
         return format_daily_summary(data)
 
     # ── Today summary (legacy format) ────────────

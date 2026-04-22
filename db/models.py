@@ -29,6 +29,8 @@ class Shop(Base):
     state_code = Column(String(5), default="")
     default_pricing   = Column(String(10), default="exclusive")
     default_bill_type = Column(String(15), nullable=True)
+    last_summary_sent_at = Column(DateTime, nullable=True)
+    summary_opt_out      = Column(Boolean, default=False)
     api_key    = Column(String(64), unique=True, nullable=True, index=True)
     active     = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -72,7 +72,7 @@ _REQUIRED_SCHEMA = {
     "registrations":      ["invoice_type", "state_name", "state_code"],
     "conversation_log":   ["phone", "direction", "message"],
     "shops":              ["api_key", "state", "state_code", "upi", "default_pricing",
-                          "default_bill_type"],
+                          "default_bill_type", "last_summary_sent_at", "summary_opt_out"],
 }
 
 

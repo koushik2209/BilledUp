@@ -20,6 +20,8 @@ import hashlib
 import random
 import string
 import logging
+import time
+import pytz
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from flask import Flask, request, Response
@@ -466,6 +468,92 @@ def api_today_summary():
         return err
     summary = get_today_summary(shop_row.shop_id)
     return {"shop_id": shop_row.shop_id, **summary}, 200
+
+
+@app.route("/api/cron/daily-summary", methods=["POST"])
+def api_cron_daily_summary():
+    """POST /api/cron/daily-summary — Triggered by cron-job.org at 9 PM IST.
+
+    Auth: Authorization: Bearer <CRON_SECRET>
+    Returns: {"sent": N, "skipped": N, "failed": N}
+    """
+    from services.daily_summary_service import get_daily_summary_data
+    from core.daily_summary import format_daily_summary
+    from services.registration import get_shop_id as _get_shop_id
+
+    cron_secret = os.environ.get("CRON_SECRET", "")
+    auth_header = request.headers.get("Authorization", "")
+    if not cron_secret or auth_header != f"Bearer {cron_secret}":
+        return {"error": "Unauthorized"}, 401
+
+    IST       = pytz.timezone("Asia/Kolkata")
+    today_ist = datetime.now(IST).date()
+    now_utc   = datetime.utcnow()
+
+    sent = skipped = failed = 0
+
+    with db_session() as session:
+        active_regs = session.query(Registration).filter(
+            Registration.active.is_(True),
+            Registration.trial_end > now_utc,
+        ).all()
+        tasks = []
+        for reg in active_regs:
+            shop_id  = _get_shop_id(reg.phone)
+            shop_row = session.query(Shop).filter_by(shop_id=shop_id).first()
+            if not shop_row:
+                continue
+            tasks.append({
+                "phone":     reg.phone,
+                "shop_id":   shop_row.shop_id,
+                "opt_out":   bool(shop_row.summary_opt_out),
+                "last_sent": shop_row.last_summary_sent_at,
+            })
+
+    for task in tasks:
+        phone   = task["phone"]
+        shop_id = task["shop_id"]
+
+        if task["opt_out"]:
+            skipped += 1
+            continue
+
+        last_sent = task["last_sent"]
+        if last_sent is not None:
+            aware = (
+                pytz.utc.localize(last_sent)
+                if last_sent.tzinfo is None
+                else last_sent
+            )
+            if aware.astimezone(IST).date() == today_ist:
+                skipped += 1
+                continue
+
+        try:
+            data = get_daily_summary_data(shop_id, today_ist)
+            if data["today"]["total_bills"] == 0:
+                skipped += 1
+                continue
+
+            message = format_daily_summary(data)
+            send_text_message(phone, message)
+
+            with db_session() as upd:
+                row = upd.query(Shop).filter_by(shop_id=shop_id).first()
+                if row:
+                    row.last_summary_sent_at = datetime.utcnow()
+
+            sent += 1
+
+        except Exception as e:
+            log.error(
+                f"[SUMMARY FAILED] shop={shop_id}, phone={phone}, error={e}"
+            )
+            failed += 1
+
+        time.sleep(0.15)
+
+    return {"sent": sent, "skipped": skipped, "failed": failed}, 200
 
 
 # ════════════════════════════════════════════════

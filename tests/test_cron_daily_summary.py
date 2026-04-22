@@ -52,7 +52,7 @@ def test_cron_endpoint_returns_200_with_correct_secret(client, monkeypatch):
 def test_cron_endpoint_skips_already_sent_shop(client, monkeypatch):
     """Shop with last_summary_sent_at = today (IST) must be skipped."""
     import pytz
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     from db.session import db_session
     from db.models import Shop, Registration
 
@@ -80,8 +80,8 @@ def test_cron_endpoint_skips_already_sent_shop(client, monkeypatch):
             gstin="36AABCU9603R1ZX",
             state="ACTIVE",
             active=True,
-            trial_start=datetime.utcnow(),
-            trial_end=datetime.utcnow() + timedelta(days=10),
+            trial_start=datetime.now(timezone.utc),
+            trial_end=datetime.now(timezone.utc) + timedelta(days=10),
         )
         session.add(reg)
 

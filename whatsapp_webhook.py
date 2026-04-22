@@ -23,7 +23,7 @@ import logging
 import time
 import pytz
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, Response
 
 from config import (
@@ -488,7 +488,7 @@ def api_cron_daily_summary():
 
     IST       = pytz.timezone("Asia/Kolkata")
     today_ist = datetime.now(IST).date()
-    now_utc   = datetime.utcnow()
+    now_utc   = datetime.now(timezone.utc)
 
     sent = skipped = failed = 0
 
@@ -539,13 +539,17 @@ def api_cron_daily_summary():
 
             message = format_daily_summary(data)
             send_text_message(phone, message)
-
-            with db_session() as upd:
-                row = upd.query(Shop).filter_by(shop_id=shop_id).first()
-                if row:
-                    row.last_summary_sent_at = datetime.utcnow()
-
             sent += 1
+
+            try:
+                with db_session() as upd:
+                    row = upd.query(Shop).filter_by(shop_id=shop_id).first()
+                    if row:
+                        row.last_summary_sent_at = datetime.now(timezone.utc)
+            except Exception as db_err:
+                log.error(
+                    f"[SUMMARY DB UPDATE FAILED] shop={shop_id}, error={db_err}"
+                )
 
         except Exception as e:
             log.error(

@@ -162,3 +162,47 @@ def test_get_daily_summary_data_raises_for_unknown_shop():
     import pytest
     with pytest.raises(ValueError, match="Shop not found"):
         get_daily_summary_data("NOSUCHSHOP", date(2026, 4, 22))
+
+
+def test_get_daily_summary_data_excludes_previous_month_bills():
+    main.init_database()
+    from services.daily_summary_service import get_daily_summary_data
+
+    target = date(2026, 4, 22)
+
+    with db_session() as session:
+        _shop(session, "S10000005")
+        # bill in March — must NOT appear in April month totals
+        _bill(session, "S10000005",
+              grand_total=9999.0, subtotal=9000.0, total_gst=999.0,
+              created_at=datetime(2026, 3, 31, 10, 0, 0))
+        # bill in April — must appear
+        _bill(session, "S10000005",
+              grand_total=1000.0, subtotal=900.0, total_gst=100.0,
+              created_at=datetime(2026, 4, 1, 10, 0, 0))
+
+    result = get_daily_summary_data("S10000005", target)
+
+    assert result["month"]["total_bills"] == 1
+    assert result["month"]["grand_total"] == 1000.0
+
+
+def test_get_daily_summary_data_returns_amount_is_positive_for_negative_stored_value():
+    main.init_database()
+    from services.daily_summary_service import get_daily_summary_data
+
+    with db_session() as session:
+        _shop(session, "S10000006")
+        _bill(session, "S10000006",
+              grand_total=5000.0, subtotal=4500.0, total_gst=500.0,
+              created_at=datetime(2026, 4, 22, 9, 0, 0))
+        # return bill with negatively stored grand_total (some systems store returns as negative)
+        _bill(session, "S10000006",
+              grand_total=-1000.0, subtotal=-900.0, total_gst=-100.0,
+              created_at=datetime(2026, 4, 22, 11, 0, 0),
+              is_return=True)
+
+    result = get_daily_summary_data("S10000006", date(2026, 4, 22))
+
+    assert result["today"]["returns_amount"] == 1000.0  # positive, not -1000
+    assert result["today"]["grand_total"]    == 5000.0  # sales unaffected

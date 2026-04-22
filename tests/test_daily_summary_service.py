@@ -1,36 +1,19 @@
 """Tests for daily summary service and schema."""
-import main
-
-
-def test_shop_schema_has_new_columns():
-    """Verify last_summary_sent_at and summary_opt_out exist on shops table."""
-    from sqlalchemy import inspect as sa_inspect
-    from db.session import engine
-
-    main.init_database()
-
-    inspector = sa_inspect(engine)
-    cols = {c["name"] for c in inspector.get_columns("shops")}
-    assert "last_summary_sent_at" in cols, "missing column: last_summary_sent_at"
-    assert "summary_opt_out" in cols, "missing column: summary_opt_out"
-
-
+import uuid
 from datetime import date, datetime
+
 import pytest
+
+import main
 from db.session import db_session
 from db.models import Shop, Bill
 
 
-# ── DB fixture helpers ────────────────────────────────────────────
-
-_counter = 0
-
-
 def _next_inv() -> str:
-    global _counter
-    _counter += 1
-    return f"TEST-{_counter:05d}"
+    return f"TEST-{uuid.uuid4().hex[:8].upper()}"
 
+
+# ── DB fixture helpers ────────────────────────────────────────────
 
 def _shop(session, shop_id="S99999999", gstin="36AABCU9603R1ZX"):
     s = Shop(
@@ -68,6 +51,19 @@ def _bill(session, shop_id, grand_total, subtotal, total_gst,
 
 
 # ── Tests ─────────────────────────────────────────────────────────
+
+def test_shop_schema_has_new_columns():
+    """Verify last_summary_sent_at and summary_opt_out exist on shops table."""
+    from sqlalchemy import inspect as sa_inspect
+    from db.session import engine
+
+    main.init_database()
+
+    inspector = sa_inspect(engine)
+    cols = {c["name"] for c in inspector.get_columns("shops")}
+    assert "last_summary_sent_at" in cols, "missing column: last_summary_sent_at"
+    assert "summary_opt_out" in cols, "missing column: summary_opt_out"
+
 
 def test_get_daily_summary_data_basic():
     main.init_database()
@@ -159,7 +155,6 @@ def test_get_daily_summary_data_no_gstin():
 def test_get_daily_summary_data_raises_for_unknown_shop():
     main.init_database()
     from services.daily_summary_service import get_daily_summary_data
-    import pytest
     with pytest.raises(ValueError, match="Shop not found"):
         get_daily_summary_data("NOSUCHSHOP", date(2026, 4, 22))
 

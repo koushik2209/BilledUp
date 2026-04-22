@@ -70,7 +70,7 @@ def test_cron_endpoint_skips_already_sent_shop(client, monkeypatch):
             phone="917777777777",
             state="Telangana",
             state_code="36",
-            last_summary_sent_at=datetime.utcnow(),  # already sent today
+            last_summary_sent_at=datetime.now(IST),  # already sent today (IST-aware)
         )
         session.add(shop)
         reg = Registration(

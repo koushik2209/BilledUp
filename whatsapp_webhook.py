@@ -499,7 +499,9 @@ def api_cron_daily_summary():
         ).all()
         tasks = []
         for reg in active_regs:
-            shop_id  = _get_shop_id(reg.phone)
+            shop_id = _get_shop_id(reg.phone)
+            if not shop_id:
+                continue
             shop_row = session.query(Shop).filter_by(shop_id=shop_id).first()
             if not shop_row:
                 continue

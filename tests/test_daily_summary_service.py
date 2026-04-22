@@ -204,7 +204,16 @@ def test_get_daily_summary_data_returns_amount_is_positive_for_negative_stored_v
 
 
 def test_summary_command_uses_new_formatter(monkeypatch):
-    """summary command must call get_daily_summary_data, not msg_today_summary."""
+    """summary command must call get_daily_summary_data, not msg_today_summary.
+
+    Patch target is "services.daily_summary_service.get_daily_summary_data"
+    (the source module attribute).  This is correct even though
+    conversation/manager.py uses a local ``from services.daily_summary_service
+    import get_daily_summary_data`` inside the function body: Python re-reads
+    ``sys.modules['services.daily_summary_service'].get_daily_summary_data``
+    each time that line executes, so patching the module attribute is
+    sufficient and the mock is intercepted on every call.
+    """
     main.init_database()
     from conversation import manager as mgr
 
@@ -233,6 +242,7 @@ def test_summary_command_uses_new_formatter(monkeypatch):
 
     def _mock_get_data(shop_id, target_date):
         captured["called"] = True
+        captured["shop_id"] = shop_id
         return {
             "shop_name": "Test Shop",
             "has_gstin": True,
@@ -246,11 +256,21 @@ def test_summary_command_uses_new_formatter(monkeypatch):
                       "returns_amount": 0.0},
         }
 
+    # Patch the source-module attribute.  Because manager.py uses
+    # ``from services.daily_summary_service import get_daily_summary_data``
+    # INSIDE the function body (not at module level), Python looks up the
+    # attribute on the module object on every call — so this patch is
+    # sufficient to intercept it.
     monkeypatch.setattr(
         "services.daily_summary_service.get_daily_summary_data",
         _mock_get_data,
     )
 
     reply = mgr.handle_message("919999999099", "summary")
-    assert captured.get("called"), "get_daily_summary_data was not called"
+
+    # Verify the mock was actually invoked (proves interception, not just pass).
+    assert captured.get("called") is True, (
+        "get_daily_summary_data was NOT called — monkeypatch did not intercept"
+    )
+    assert "shop_id" in captured, "mock was not called with a shop_id argument"
     assert "📊" in reply

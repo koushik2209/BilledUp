@@ -705,35 +705,75 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
         # Determine invoice type from registration
         is_bos = reg.get("invoice_type") == "BILL_OF_SUPPLY"
 
-        # Resolve GST rates (skip for Bill of Supply — no GST applied)
-        failed_items: list = []
+        # ── Resolve GST per item, partition into valid / failed ──
+        # Keep the full item dict (not just the name) for failed items so the
+        # clarification flow can diff by name and preserve prices/qtys.
+        valid_resolved:  list[dict] = []
+        failed_resolved: list[dict] = []
         for item in parsed["items"]:
             if is_bos:
                 _apply_bos_defaults(item)
-            else:
-                try:
-                    rate_info = _resolve_gst_for_item(
-                        item["name"], item["price"], shop_id
-                    )
-                except GSTLookupError:
-                    failed_items.append(item["name"])
-                    continue
-                item["hsn"]            = rate_info["hsn"]
-                item["gst_rate"]       = rate_info["gst"]
-                item["gst_source"]     = rate_info.get("source", "default")
-                item["gst_confidence"] = rate_info.get("confidence", "low")
+                valid_resolved.append(item)
+                continue
+            try:
+                rate_info = _resolve_gst_for_item(
+                    item["name"], item["price"], shop_id
+                )
+            except GSTLookupError:
+                failed_resolved.append(item)
+                continue
+            item["hsn"]            = rate_info["hsn"]
+            item["gst_rate"]       = rate_info["gst"]
+            item["gst_source"]     = rate_info.get("source", "default")
+            item["gst_confidence"] = rate_info.get("confidence", "low")
+            valid_resolved.append(item)
 
-        if failed_items:
-            send(from_number, _format_failed_items_msg(failed_items))
+        # Decide return/credit-note intent NOW so it survives clarification rounds.
+        is_return = detect_return_intent(message, parsed["items"])
+
+        # ── Partial failure → enter awaiting_gst_clarification state ──
+        # Hold resolved items as `valid_items`, unresolved as `failed_items`.
+        # `items` stays empty until every GST is resolved; only then is it
+        # populated, so billing math never runs on an incomplete set.
+        if failed_resolved:
+            pending = PendingBill(
+                phone              = from_number,
+                shop_id            = shop_id,
+                shop_name          = shop_name,
+                shop_state         = shop_state,
+                shop_state_code    = shop_state_code,
+                customer_name      = parsed["customer_name"],
+                customer_state     = shop_state,
+                customer_state_code= shop_state_code,
+                items              = [],
+                confidence         = parsed.get("confidence", 1.0),
+                warnings           = parsed.get("warnings", []),
+                raw_message        = message,
+                created_at         = datetime.utcnow(),
+                is_return          = is_return,
+                is_bill_of_supply  = is_bos,
+                is_inclusive       = pricing_type == "inclusive" and not is_bos,
+                customer_phone     = parsed.get("customer_phone") or "",
+                pricing_type       = pricing_type if not is_bos else "exclusive",
+                bill_discount_type = parsed.get("bill_discount_type", "none") or "none",
+                bill_discount_value= float(parsed.get("bill_discount_value", 0) or 0),
+                needs_confirmation = bool(parsed.get("needs_confirmation", False)),
+                valid_items                = valid_resolved,
+                failed_items               = failed_resolved,
+                awaiting_gst_clarification = True,
+            )
+            store_pending(from_number, pending)
+            send(
+                from_number,
+                _format_failed_items_msg([i["name"] for i in failed_resolved]),
+            )
             return
 
-        # Detect return/credit note intent
-        is_return = detect_return_intent(message, parsed["items"])
-        bill_items = parsed["items"]
+        # ── All items resolved → apply return negation and finalize ──
+        bill_items = valid_resolved
         if is_return:
             bill_items = negate_items(bill_items)
-            # Re-attach resolved GST rates to negated items
-            for neg, orig in zip(bill_items, parsed["items"]):
+            for neg, orig in zip(bill_items, valid_resolved):
                 neg["hsn"]            = orig["hsn"]
                 neg["gst_rate"]       = orig["gst_rate"]
                 neg["gst_source"]     = orig.get("gst_source", "default")
@@ -801,6 +841,109 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
         )
 
 
+# ════════════════════════════════════════════════
+# GST CLARIFICATION FLOW
+# ════════════════════════════════════════════════
+
+def _handle_gst_clarification(
+    from_number: str, message: str, pending: PendingBill,
+) -> None:
+    """Resolve GST for previously-failed items using the user's clarification.
+
+    Flow:
+      1. Re-parse the user's message as a bill fragment (names + prices).
+      2. Resolve GST for each newly-parsed item via `_resolve_gst_for_item`.
+      3. Merge newly-resolved items into `pending.valid_items`; any still-failing
+         items replace `pending.failed_items`.
+      4. If failures remain → keep state, re-send the failed-items message.
+      5. Else → promote `valid_items` to `pending.items` (applying return
+         negation if needed), clear the three clarification fields, and show
+         the bill preview — resuming the normal confirmation flow.
+
+    The user's clarification fully replaces the previously-failed items; it is
+    not merged per-name (too unreliable). If the user restates fewer items
+    than failed, the missing ones are dropped.
+    """
+    try:
+        parsed = parse_message(message)
+
+        # Bad input → keep state, re-prompt with the current failed set.
+        if parsed.get("error") or not parsed.get("items"):
+            still_failed_names = [i["name"] for i in pending.failed_items]
+            send(
+                from_number,
+                "❌ I couldn't read that as items with prices.\n"
+                "_Example:_ *power adapter 500*\n\n"
+                + _format_failed_items_msg(still_failed_names),
+            )
+            return
+
+        # Try GST for each newly-parsed item.
+        new_valid:    list[dict] = []
+        still_failed: list[dict] = []
+        for item in parsed["items"]:
+            if pending.is_bill_of_supply:
+                _apply_bos_defaults(item)
+                new_valid.append(item)
+                continue
+            try:
+                rate_info = _resolve_gst_for_item(
+                    item["name"], item["price"], pending.shop_id,
+                )
+            except GSTLookupError:
+                still_failed.append(item)
+                continue
+            item["hsn"]            = rate_info["hsn"]
+            item["gst_rate"]       = rate_info["gst"]
+            item["gst_source"]     = rate_info.get("source", "default")
+            item["gst_confidence"] = rate_info.get("confidence", "low")
+            new_valid.append(item)
+
+        # Merge resolved into accumulator; still-failed replaces old failed set.
+        pending.valid_items  = list(pending.valid_items) + new_valid
+        pending.failed_items = still_failed
+        pending.created_at   = datetime.utcnow()   # refresh 10-min expiry
+
+        # Still some failures → stay in clarification state, ask again.
+        if still_failed:
+            store_pending(from_number, pending)
+            send(
+                from_number,
+                _format_failed_items_msg([i["name"] for i in still_failed]),
+            )
+            return
+
+        # ── All resolved → promote to pending.items and exit clarification ──
+        bill_items = pending.valid_items
+        if pending.is_return:
+            bill_items = negate_items(bill_items)
+            for neg, orig in zip(bill_items, pending.valid_items):
+                neg["hsn"]            = orig["hsn"]
+                neg["gst_rate"]       = orig["gst_rate"]
+                neg["gst_source"]     = orig.get("gst_source", "default")
+                neg["gst_confidence"] = orig.get("gst_confidence", "low")
+
+        pending.items                      = bill_items
+        pending.valid_items                = []
+        pending.failed_items               = []
+        pending.awaiting_gst_clarification = False
+        pending.created_at                 = datetime.utcnow()
+
+        _assert_bos_invariant(pending.items, pending.is_bill_of_supply)
+        store_pending(from_number, pending)
+        send(from_number, "✅ All items resolved.\n\n" + msg_preview(pending))
+
+    except Exception as e:
+        log.error(
+            f"GST clarification failed | phone={from_number} | error={e}",
+            exc_info=True,
+        )
+        send(from_number,
+             "❌ Something went wrong while fixing those items.\n"
+             "Please try again or type *CANCEL* to start over."
+        )
+
+
 def _match_item_by_name(search: str, items: list) -> int | None:
     """Match a search string to a pending bill item by name.
 
@@ -834,6 +977,31 @@ def _match_item_by_name(search: str, items: list) -> int | None:
 def _handle_confirmation(from_number: str, msg_lower: str, message: str,
                          pending: PendingBill, reg: dict, d_left: int):
     """Handle user commands during bill preview/confirmation."""
+
+    # ── GST clarification intercept ──
+    # If the pending bill is still waiting for the user to clarify items that
+    # failed GST lookup, re-route everything here. CANCEL and EDIT remain
+    # escape hatches; a plain YES is nonsensical (nothing to confirm yet) so
+    # we nudge the user back to the outstanding items.
+    if getattr(pending, "awaiting_gst_clarification", False):
+        if msg_lower in ("cancel", "no", "discard"):
+            clear_pending(from_number)
+            send(from_number, "❌ Bill discarded.\n\nSend a new message to create another bill.")
+            return
+        if msg_lower in ("edit", "change", "redo"):
+            clear_pending(from_number)
+            send(from_number,
+                 "✏️ *Cleared.* Send your items again:\n"
+                 "_Example:_ _shirt 500 pant 700 customer Suresh_")
+            return
+        if msg_lower in ("yes", "y", "confirm", "ok", "done"):
+            names = [i["name"] for i in pending.failed_items]
+            send(from_number,
+                 "⚠️ Can't confirm yet — some items still need GST clarification.\n\n"
+                 + _format_failed_items_msg(names))
+            return
+        _handle_gst_clarification(from_number, message, pending)
+        return
 
     # YES → generate bill
     if msg_lower in ("yes", "y", "confirm", "ok", "done"):
@@ -958,24 +1126,26 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             shop_state      = shop.state if shop else pending.shop_state
             shop_state_code = shop.state_code if shop else pending.shop_state_code
 
+            failed_items: list[str] = []
             for item in parsed["items"]:
                 if pending.is_bill_of_supply:
-                    item["hsn"]            = "9999"
-                    item["gst_rate"]       = 0
-                    item["gst_source"]     = "bill_of_supply"
-                    item["gst_confidence"] = "high"
+                    _apply_bos_defaults(item)
                 else:
                     try:
                         rate_info = _resolve_gst_for_item(
                             item["name"], item["price"], pending.shop_id
                         )
                     except GSTLookupError:
-                        send(from_number, _GST_FAILURE_MSG)
-                        return
+                        failed_items.append(item["name"])
+                        continue
                     item["hsn"]            = rate_info["hsn"]
                     item["gst_rate"]       = rate_info["gst"]
                     item["gst_source"]     = rate_info.get("source", "default")
                     item["gst_confidence"] = rate_info.get("confidence", "low")
+
+            if failed_items:
+                send(from_number, _format_failed_items_msg(failed_items))
+                return
 
             is_return = detect_return_intent(message, parsed["items"])
             bill_items = parsed["items"]

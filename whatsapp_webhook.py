@@ -111,6 +111,7 @@ from services.billing import (
     _is_confirmation_command,
     _handle_gst_report,
     _handle_new_bill,
+    _handle_gst_clarification,
     _match_item_by_name,
     _handle_confirmation,
     _handle_state_selection,

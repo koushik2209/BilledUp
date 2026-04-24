@@ -7,7 +7,7 @@ Stores serialized PendingBill in the DB with expiry.
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from database import db_session, PendingBillRecord
@@ -42,6 +42,16 @@ class PendingBill:
     bill_discount_type: str = "none"          # "none" | "percent" | "flat" | "override"
     bill_discount_value: float = 0.0
     needs_confirmation: bool = False
+    # ── GST clarification state ──
+    # When some items fail GST lookup, the bill enters a partial state:
+    #   valid_items    = items that resolved successfully (carry hsn/gst_rate)
+    #   failed_items   = items still needing clarification (raw dicts, no hsn/gst_rate)
+    #   awaiting_gst_clarification = True while user is correcting failed items
+    # On full resolution, valid_items is promoted to `items` and the three
+    # fields reset. `items` is the single source of truth for billing math.
+    valid_items: list                   = field(default_factory=list)
+    failed_items: list                  = field(default_factory=list)
+    awaiting_gst_clarification: bool    = False
 
 
 def _serialize_pending(bill: PendingBill) -> str:
@@ -70,6 +80,9 @@ def _serialize_pending(bill: PendingBill) -> str:
         "bill_discount_type": bill.bill_discount_type,
         "bill_discount_value": bill.bill_discount_value,
         "needs_confirmation": bill.needs_confirmation,
+        "valid_items": bill.valid_items,
+        "failed_items": bill.failed_items,
+        "awaiting_gst_clarification": bill.awaiting_gst_clarification,
     }
     return json.dumps(data)
 
@@ -86,6 +99,9 @@ def _deserialize_pending(json_str: str) -> PendingBill:
     data.setdefault("bill_discount_type", "none")
     data.setdefault("bill_discount_value", 0.0)
     data.setdefault("needs_confirmation", False)
+    data.setdefault("valid_items", [])
+    data.setdefault("failed_items", [])
+    data.setdefault("awaiting_gst_clarification", False)
     return PendingBill(**data)
 
 

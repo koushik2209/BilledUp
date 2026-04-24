@@ -8,6 +8,12 @@ No database queries, no send calls, no Flask request access.
 from config import PLATFORM_NAME
 
 
+def _safe_display_name(name: str) -> str:
+    """Return stripped name, or 'your shop' if blank/None."""
+    s = (name or "").strip()
+    return s if s else "your shop"
+
+
 # ── State selection menu (maps menu number → GST state code) ──
 _STATE_MENU = [
     ("37", "Andhra Pradesh"),
@@ -69,6 +75,7 @@ def msg_ask_state() -> str:
 
 def msg_activated(shop_name: str, days: int, api_key: str = "",
                   invoice_type: str = "TAX_INVOICE", state_name: str = "") -> str:
+    display = _safe_display_name(shop_name)
     key_line = f"\n🔑 *Your API Key:*\n`{api_key}`\n_Keep this safe — use it for API access._\n" if api_key else ""
     if invoice_type == "BILL_OF_SUPPLY":
         bill_type_line = (
@@ -79,7 +86,7 @@ def msg_activated(shop_name: str, days: int, api_key: str = "",
         bill_type_line = "✅ Your bills will include GST (*Tax Invoice*).\n"
     state_line = f"📍 Shop state: {state_name} (for GST calculation)\n" if state_name else ""
     return (
-        f"🎊 *You are all set, {shop_name}!*\n\n"
+        f"🎊 *You are all set, {display}!*\n\n"
         f"{bill_type_line}\n"
         f"{state_line}"
         f"Your *{days}-day free trial* has started.\n"

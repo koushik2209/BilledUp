@@ -842,7 +842,8 @@ def test_return_gst_reversal_values():
     customer = CustomerInfo("Test")
     items = [BillItem("phone case", 1, 500, hsn="3926", gst_rate=18)]
     pdf_bytes, br = generate_pdf_bill(shop, customer, items, "CN-TEST-001",
-                                      gst_client=None, is_return=True)
+                                      gst_client=None, is_return=True,
+                                      bill_of_supply=False)
     assert isinstance(pdf_bytes, bytes)
     assert len(pdf_bytes) > 0
     assert br.subtotal < 0
@@ -1940,6 +1941,7 @@ class TestPhoneInInvoiceOutput:
         pdf_bytes, _ = generate_pdf_bill(
             shop=shop, customer=customer, items=items,
             invoice_number="INV-TEST-PDF-1",
+            bill_of_supply=False,
         )
         # ReportLab PDFs are zlib-compressed so we can't grep the raw bytes
         # for "9876543210". The contract we care about here is that the
@@ -2426,6 +2428,43 @@ class TestDefaultBillType:
         assert pending.is_bill_of_supply is True, (
             "Per-message set_bill_type='bill_of_supply' must override default_bill_type"
         )
+
+
+    # ── settings action priority ─────────────────────────────────────────
+
+    def test_set_gstin_takes_priority_over_set_default_bill_type(self):
+        """When both set_gstin and set_default_bill_type arrive together, set_gstin wins
+        and set_default_bill_type is silently dropped (logged at INFO level)."""
+        from database import init_database, db_session
+        from db.models import Shop
+        from services.registration import activate_trial
+        from conversation.executor import execute_action
+
+        init_database()
+        phone = "whatsapp:+919000000097"
+        activate_trial(phone, "Priority Test Shop", "Hyderabad", gstin="",
+                       state_name="Telangana", state_code="36")
+
+        ctx = self._make_ctx(phone, gstin="", default_bill_type="")
+
+        result_dict = {
+            "action": "settings",
+            "reply": "",
+            "bill_changes": {
+                "set_gstin": "36AABCU9603R1ZX",
+                "set_default_bill_type": "bill_of_supply",
+            },
+        }
+        execute_action(result_dict, phone, ctx)
+
+        shop_id = "S" + "919000000097"[-8:]
+        with db_session() as s:
+            shop = s.query(Shop).filter_by(shop_id=shop_id).first()
+            assert shop is not None
+            # GSTIN was applied
+            assert shop.gstin == "36AABCU9603R1ZX"
+            # default_bill_type was NOT applied (set_gstin took priority)
+            assert (shop.default_bill_type or "") == ""
 
 
 class TestCustomerStateExtraction:

@@ -416,6 +416,7 @@ def api_generate_bill():
         pdf_data, bill_result = generate_pdf_bill(
             shop=shop, customer=customer, items=items,
             invoice_number=invoice_number, gst_client=get_anthropic_client(),
+            bill_of_supply=not shop.has_gstin,
         )
     except Exception as e:
         log.error(f"API bill generation failed: {e}", exc_info=True)

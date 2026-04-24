@@ -149,6 +149,96 @@ def msg_history(shop_id: str) -> str:
 
 
 # ════════════════════════════════════════════════
+# GST INVARIANT HELPERS
+# ════════════════════════════════════════════════
+
+class GSTLookupError(Exception):
+    """Raised when GST rate detection fails for an item.
+
+    Caller is responsible for user messaging; this exception carries only
+    the failing item name for logging.
+    """
+
+
+def _resolve_gst_for_item(name: str, price: float, shop_id: str) -> dict:
+    """Resolve GST for a single item — no silent fallbacks.
+
+    Returns dict with 'hsn' and 'gst' keys on success.
+    Raises GSTLookupError on lookup failure (already logged).
+    """
+    try:
+        rate_info = get_gst_rate_smart(
+            name, get_anthropic_client(), shop_id=shop_id
+        )
+    except Exception as e:
+        log.error(
+            f"GST lookup failed | item={name} | price={price} | "
+            f"shop_id={shop_id} | error={e}",
+            exc_info=True,
+        )
+        raise GSTLookupError(name) from e
+    return adjust_gst_for_price(name, price, rate_info)
+
+
+def _format_failed_items_msg(failed_items: list) -> str:
+    """Format user-facing message listing items that failed GST lookup."""
+    return (
+        "❌ Couldn't determine GST for:\n"
+        + "\n".join(f"- {name}" for name in failed_items)
+        + "\n\nPlease clarify these items."
+    )
+
+
+def _apply_bos_defaults(item: dict) -> None:
+    """Apply Bill of Supply defaults to an item dict (mutates in place).
+
+    Always: gst_rate=0, metadata flags set.
+    HSN: preserved if already present/non-empty; otherwise set to '9999'.
+    """
+    item["gst_rate"] = 0
+    if "hsn" not in item or not item["hsn"]:
+        item["hsn"] = "9999"
+    item["gst_source"]     = "bill_of_supply"
+    item["gst_confidence"] = "high"
+
+
+def _assert_bos_invariant(items: list, is_bill_of_supply: bool) -> None:
+    """Raise ValueError if any BOS item carries non-zero GST.
+
+    No-op when is_bill_of_supply=False.
+    """
+    if not is_bill_of_supply:
+        return
+    for item in items:
+        if item.get("gst_rate") != 0:
+            log.error(
+                f"[BOS ERROR] Non-zero GST in bill of supply: "
+                f"item={item.get('name')!r} gst_rate={item.get('gst_rate')!r}"
+            )
+            raise ValueError("Invalid GST for bill of supply")
+
+
+def _assert_gst_data_present(items: list) -> None:
+    """Validate every item has hsn + gst_rate populated from preview.
+
+    Uses if/raise (NOT assert) because asserts are stripped under `python -O`.
+    """
+    for item in items:
+        if "gst_rate" not in item or item["gst_rate"] is None:
+            log.error(
+                f"GST data missing | field=gst_rate | "
+                f"item={item.get('name')!r}"
+            )
+            raise ValueError("GST data missing in pending bill")
+        if "hsn" not in item or not item["hsn"]:
+            log.error(
+                f"GST data missing | field=hsn | "
+                f"item={item.get('name')!r}"
+            )
+            raise ValueError("GST data missing in pending bill")
+
+
+# ════════════════════════════════════════════════
 # PREVIEW + CONFIRMATION MESSAGES
 # ════════════════════════════════════════════════
 
@@ -156,21 +246,30 @@ def _build_bill_items(pending: PendingBill) -> list:
     """Build BillItem list from PendingBill item dicts."""
     result = []
     for i in pending.items:
-        gst = i.get("gst_rate", 18)
-        # Safety: Tax Invoice must never have 0% GST unless the item genuinely has 0%.
-        # A non-None, non-zero original_gst means the zero is a stale BOS leftover.
+        hsn = i.get("hsn") or ""
+        gst_rate_raw = i.get("gst_rate")
+        if not hsn or gst_rate_raw is None:
+            log.error(
+                f"_build_bill_items: '{i['name']}' missing hsn={hsn!r} "
+                f"or gst_rate={gst_rate_raw!r} — data integrity error"
+            )
+            raise ValueError(
+                f"Item '{i['name']}' is missing hsn or gst_rate in stored pending bill"
+            )
+        gst = float(gst_rate_raw)
+        # Tax Invoice must never have gst_rate=0 unless item is genuinely exempt.
+        # A non-zero original_gst means the zero is a stale BOS leftover.
         if not pending.is_bill_of_supply and gst == 0:
             og = i.get("original_gst")
             if og:
-                import logging as _log
-                _log.getLogger("billedup.billing").warning(
+                log.warning(
                     f"_build_bill_items: '{i['name']}' gst_rate=0 in Tax Invoice mode "
                     f"— restoring original_gst={og}%"
                 )
                 gst = og
         result.append(BillItem(
             name=i["name"], qty=i["qty"], price=abs(i["price"]),
-            hsn=i.get("hsn", ""), gst_rate=gst,
+            hsn=hsn, gst_rate=gst,
             item_discount_type=i.get("item_discount_type", "none") or "none",
             item_discount_value=float(i.get("item_discount_value", 0) or 0),
         ))
@@ -521,6 +620,8 @@ def _build_pending_from_parser(
 
 def _compute_bill_from_pending(pb: PendingBill):
     """Run calculate_bill over a confirmed PendingBill."""
+    _assert_bos_invariant(pb.items, pb.is_bill_of_supply)
+    _assert_gst_data_present(pb.items)
     return calculate_bill(
         _build_bill_items(pb),
         shop_state_code=pb.shop_state_code,
@@ -605,24 +706,26 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
         is_bos = reg.get("invoice_type") == "BILL_OF_SUPPLY"
 
         # Resolve GST rates (skip for Bill of Supply — no GST applied)
+        failed_items: list = []
         for item in parsed["items"]:
             if is_bos:
-                item["hsn"]            = "9999"
-                item["gst_rate"]       = 0
-                item["gst_source"]     = "bill_of_supply"
-                item["gst_confidence"] = "high"
+                _apply_bos_defaults(item)
             else:
                 try:
-                    rate_info = get_gst_rate_smart(item["name"], get_anthropic_client(), shop_id=shop_id)
-                except Exception as e:
-                    log.warning(f"GST lookup failed for '{item['name']}': {e}")
-                    rate_info = {"hsn": "9999", "gst": 18, "source": "default", "confidence": "low"}
-                # Apply price-based slab (clothing/footwear)
-                rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
-                item["hsn"]            = rate_info.get("hsn", "9999")
-                item["gst_rate"]       = rate_info.get("gst", 18)
+                    rate_info = _resolve_gst_for_item(
+                        item["name"], item["price"], shop_id
+                    )
+                except GSTLookupError:
+                    failed_items.append(item["name"])
+                    continue
+                item["hsn"]            = rate_info["hsn"]
+                item["gst_rate"]       = rate_info["gst"]
                 item["gst_source"]     = rate_info.get("source", "default")
                 item["gst_confidence"] = rate_info.get("confidence", "low")
+
+        if failed_items:
+            send(from_number, _format_failed_items_msg(failed_items))
+            return
 
         # Detect return/credit note intent
         is_return = detect_return_intent(message, parsed["items"])
@@ -631,9 +734,9 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             bill_items = negate_items(bill_items)
             # Re-attach resolved GST rates to negated items
             for neg, orig in zip(bill_items, parsed["items"]):
-                neg["hsn"]           = orig.get("hsn", "9999")
-                neg["gst_rate"]      = orig.get("gst_rate", 18)
-                neg["gst_source"]    = orig.get("gst_source", "default")
+                neg["hsn"]            = orig["hsn"]
+                neg["gst_rate"]       = orig["gst_rate"]
+                neg["gst_source"]     = orig.get("gst_source", "default")
                 neg["gst_confidence"] = orig.get("gst_confidence", "low")
 
         pending = PendingBill(
@@ -659,6 +762,33 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             bill_discount_value= float(parsed.get("bill_discount_value", 0) or 0),
             needs_confirmation = bool(parsed.get("needs_confirmation", False)),
         )
+
+        # Safety net: guarantee every item has hsn + gst_rate before persisting.
+        safety_failed: list[str] = []
+        for item in pending.items:
+            if not item.get("hsn") or item.get("gst_rate") is None:
+                log.warning(
+                    f"_handle_new_bill: '{item.get('name')}' missing gstin fields "
+                    f"— resolving now before store_pending"
+                )
+                if is_bos:
+                    _apply_bos_defaults(item)
+                else:
+                    try:
+                        _ri = _resolve_gst_for_item(
+                            item["name"], abs(item.get("price", 0)), shop_id
+                        )
+                    except GSTLookupError:
+                        safety_failed.append(item["name"])
+                        continue
+                    item["hsn"]      = _ri["hsn"]
+                    item["gst_rate"] = _ri["gst"]
+
+        if safety_failed:
+            send(from_number, _format_failed_items_msg(safety_failed))
+            return
+
+        _assert_bos_invariant(pending.items, pending.is_bill_of_supply)
 
         store_pending(from_number, pending)
         send(from_number, msg_preview(pending))
@@ -836,13 +966,15 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
                     item["gst_confidence"] = "high"
                 else:
                     try:
-                        rate_info = get_gst_rate_smart(item["name"], get_anthropic_client())
-                    except Exception:
-                        rate_info = {"hsn": "9999", "gst": 18, "source": "default", "confidence": "low"}
-                    rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
-                    item["hsn"]           = rate_info.get("hsn", "9999")
-                    item["gst_rate"]      = rate_info.get("gst", 18)
-                    item["gst_source"]    = rate_info.get("source", "default")
+                        rate_info = _resolve_gst_for_item(
+                            item["name"], item["price"], pending.shop_id
+                        )
+                    except GSTLookupError:
+                        send(from_number, _GST_FAILURE_MSG)
+                        return
+                    item["hsn"]            = rate_info["hsn"]
+                    item["gst_rate"]       = rate_info["gst"]
+                    item["gst_source"]     = rate_info.get("source", "default")
                     item["gst_confidence"] = rate_info.get("confidence", "low")
 
             is_return = detect_return_intent(message, parsed["items"])
@@ -850,9 +982,9 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             if is_return:
                 bill_items = negate_items(bill_items)
                 for neg, orig in zip(bill_items, parsed["items"]):
-                    neg["hsn"]           = orig.get("hsn", "9999")
-                    neg["gst_rate"]      = orig.get("gst_rate", 18)
-                    neg["gst_source"]    = orig.get("gst_source", "default")
+                    neg["hsn"]            = orig["hsn"]
+                    neg["gst_rate"]       = orig["gst_rate"]
+                    neg["gst_source"]     = orig.get("gst_source", "default")
                     neg["gst_confidence"] = orig.get("gst_confidence", "low")
 
             customer_name = parsed.get("customer_name", pending.customer_name)
@@ -871,6 +1003,7 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
             if re_pt in ("inclusive", "exclusive"):
                 pending.pricing_type = re_pt
                 pending.is_inclusive = re_pt == "inclusive"
+            _assert_bos_invariant(pending.items, pending.is_bill_of_supply)
             store_pending(from_number, pending)
             send(from_number, msg_preview(pending))
             return
@@ -969,15 +1102,26 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             state      = pending.customer_state,
             state_code = pending.customer_state_code,
         )
-        items = [
-            BillItem(
+
+        _assert_bos_invariant(pending.items, pending.is_bill_of_supply)
+        _assert_gst_data_present(pending.items)
+
+        items = []
+        for i in pending.items:
+            hsn = i.get("hsn") or ""
+            gst_rate_raw = i.get("gst_rate")
+            if not hsn or gst_rate_raw is None:
+                log.error(
+                    f"_generate_confirmed_bill: '{i['name']}' missing hsn={hsn!r} "
+                    f"or gst_rate={gst_rate_raw!r} — aborting bill generation"
+                )
+                raise ValueError("GST data missing in pending bill")
+            items.append(BillItem(
                 name=i["name"], qty=i["qty"], price=abs(i["price"]),
-                hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
+                hsn=hsn, gst_rate=float(gst_rate_raw),
                 item_discount_type=i.get("item_discount_type", "none") or "none",
                 item_discount_value=float(i.get("item_discount_value", 0) or 0),
-            )
-            for i in pending.items
-        ]
+            ))
 
         invoice_number = generate_invoice_number(pending.shop_id, is_return=pending.is_return)
         pdf_data, bill_result = generate_pdf_bill(
@@ -990,6 +1134,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             is_inclusive        = pending.is_inclusive,
             bill_discount_type  = pending.bill_discount_type or "none",
             bill_discount_value = float(pending.bill_discount_value or 0.0),
+            bill_of_supply      = pending.is_bill_of_supply,
         )
 
         # Save to database (retry once, warn user on failure)
@@ -1076,8 +1221,8 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
     except Exception as e:
         log.error(f"Bill generation failed: {e}", exc_info=True)
         send(from_number,
-            f"❌ Something went wrong. Please try again.\n\n"
-            f"Support: +91 7981053846"
+            "❌ Something went wrong while finalizing your bill.\n"
+            "Please try again."
         )
 
 

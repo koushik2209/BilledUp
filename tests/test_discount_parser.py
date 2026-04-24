@@ -1059,6 +1059,7 @@ def test_pdf_renderer_shows_discount_rows():
         invoice_number="TST-DISC-1",
         is_inclusive=False,
         bill_discount_type="flat", bill_discount_value=50,
+        bill_of_supply=False,
     )
     assert isinstance(pdf_bytes, bytes) and len(pdf_bytes) > 1000
     # 500 − 10% = 450; flat 50 → taxable 400; gst 72 → grand 472

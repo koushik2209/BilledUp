@@ -14,7 +14,7 @@ from services.registration import (
     is_trial_active, days_left, activate_trial,
     get_shop_id, is_valid_gstin,
     resolve_state, INDIAN_STATES,
-    log_message,
+    log_message, validate_shop_name,
 )
 from services.pending import cleanup_expired_pending
 from services.billing import send
@@ -86,12 +86,9 @@ def handle_message(from_number: str, message: str):
 
         # ── ASKED_NAME ──
         if state == "ASKED_NAME":
-            if len(message) < 3 or message.isdigit():
-                _safe_send(
-                    from_number,
-                    "Please enter your shop name.\n"
-                    "_Example: Ravi Mobile Accessories_"
-                )
+            ok, reason = validate_shop_name(message)
+            if not ok:
+                _safe_send(from_number, reason)
                 return
 
             shop_name = message.title()
@@ -214,7 +211,7 @@ def handle_message(from_number: str, message: str):
                 from conversation.manager import handle_message as conv_handle
                 reply = conv_handle(from_number, message)
             except Exception as e:
-                log.error(f"Conversation error: {e}")
+                log.error(f"Conversation error: {e}", exc_info=True)
                 reply = _fallback_reply()
 
             # None = unexpected error path → send fallback

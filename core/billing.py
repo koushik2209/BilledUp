@@ -108,7 +108,8 @@ def calculate_bill(
 
         # Use pre-resolved rates if available (set during preview),
         # otherwise look up fresh — keeps preview and final bill in sync.
-        if item.hsn:
+        # Empty string is falsy but counts as "not resolved" — check explicitly.
+        if item.hsn is not None and item.hsn != "":
             hsn      = item.hsn
             gst_rate = item.gst_rate
         else:

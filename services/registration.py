@@ -23,6 +23,53 @@ log = logging.getLogger("billedup.registration")
 # REGISTRATION CRUD
 # ════════════════════════════════════════════════
 
+_JUNK_RE = re.compile(r"^[\W\d_]+$")  # all non-letter chars
+_REPEAT_RE = re.compile(r"(.)\1{4,}")  # same char 5+ times in a row
+_QUESTION_RE = re.compile(
+    r"^(what|who|where|when|how|why|are you|is this|what are|who are)\b",
+    re.IGNORECASE,
+)
+_JUNK_WORDS = frozenset({
+    "test", "testing", "hello", "hi", "hey", "ok", "okay",
+    "abc", "xyz", "asdf", "qwerty", "shop", "name", "shopname",
+    "my shop", "myshop", "sample", "demo", "null", "none",
+    "na", "n/a", "no", "yes",
+})
+
+_RETRY_PROMPT = (
+    "That doesn't look like a shop name. Please enter a valid name.\n"
+    "_Example: Ravi Mobile Accessories_"
+)
+
+
+def validate_shop_name(raw: str) -> tuple[bool, str]:
+    """Return (True, '') if valid, (False, reason) if not."""
+    s = (raw or "").strip()
+    if len(s) < 3:
+        return False, (
+            "Shop name is too short. Please enter at least 3 characters.\n"
+            "_Example: Ravi Mobile Accessories_"
+        )
+    if len(s) > 60:
+        return False, (
+            "Shop name is too long (max 60 characters). Please shorten it."
+        )
+    if s.isdigit():
+        return False, (
+            "That looks like a number. Please enter your shop name.\n"
+            "_Example: Ravi Mobile Accessories_"
+        )
+    if _JUNK_RE.match(s):
+        return False, _RETRY_PROMPT
+    if _REPEAT_RE.search(s.lower()):
+        return False, _RETRY_PROMPT
+    if _QUESTION_RE.match(s):
+        return False, _RETRY_PROMPT
+    if s.lower() in _JUNK_WORDS:
+        return False, _RETRY_PROMPT
+    return True, ""
+
+
 def init_registration_tables():
     """Create all tables via SQLAlchemy."""
     init_db()

@@ -313,6 +313,7 @@ def generate_bill_from_message(
             items          = items,
             invoice_number = invoice_number,
             gst_client     = get_anthropic_client(),
+            bill_of_supply = not shop.has_gstin,
         )
     except Exception as e:
         log.error(f"PDF generation failed: {e}")

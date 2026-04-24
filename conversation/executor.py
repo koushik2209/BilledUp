@@ -56,6 +56,8 @@ def _resolve_customer_state(raw: str) -> tuple[str, str] | None:
     result = resolve_state(raw)
     if result:
         return result
+    if len(raw) < 3:
+        return None
     m = fuzz_process.extractOne(raw, list(INDIAN_STATES.values()),
                                 scorer=fuzz.WRatio, score_cutoff=70)
     if m:
@@ -137,6 +139,8 @@ def execute_action(result: dict, phone: str, ctx: ShopContext) -> str:
         if action == "settings":
             set_gstin = bill_changes.get("set_gstin")
             if set_gstin:
+                if bill_changes.get("set_default_bill_type"):
+                    log.info(f"settings: set_gstin takes priority; set_default_bill_type dropped for {phone}")
                 return _handle_set_gstin(phone, set_gstin, ctx, reply)
             set_dbt = bill_changes.get("set_default_bill_type")
             if set_dbt:
@@ -1335,17 +1339,20 @@ def _toggle_items_gst(items: list, is_bos: bool, shop_id: str = "") -> None:
                 item["gst_source"] = "restored"
             else:
                 # Item created in BOS mode — look up the real rate now
+                resolved_hsn = "9999"
                 try:
                     client    = get_anthropic_client()
                     rate_info = get_gst_rate_smart(item["name"], client, shop_id=shop_id)
                     rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
                     resolved  = int(rate_info.get("gst", 18))
+                    resolved_hsn = str(rate_info.get("hsn", "9999"))
                 except Exception as exc:
                     log.warning(f"_toggle_items_gst: re-resolve failed for '{item['name']}': {exc} — using 18%")
                     resolved = 18
                 item["gst_rate"]    = resolved
                 item["original_gst"] = resolved
                 item["gst_source"]  = "resolved"
+                item["hsn"]         = resolved_hsn
 
 
 def _add_items_to_pending(

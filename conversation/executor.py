@@ -44,6 +44,182 @@ _STATE_NAME_TO_CODE: dict[str, str] = {v: k for k, v in INDIAN_STATES.items()}
 _UNSET = object()  # sentinel: "default original_gst to gst_rate" in _make_item_dict
 
 
+# ════════════════════════════════════════════════════════════════════
+# GST CLARIFICATION STATE MACHINE (mirror of services/billing.py)
+# ════════════════════════════════════════════════════════════════════
+# THIS BLOCK MUST STAY IN SYNC WITH:
+#   services/billing.py::GSTLookupError
+#   services/billing.py::_resolve_gst_for_item
+#   services/billing.py::_format_failed_items_msg
+#   services/billing.py::_handle_gst_clarification
+#   services/billing.py::_handle_confirmation  (clarification intercept)
+#
+# Semantics: strict GST resolution raises on unknown items instead of
+# silently returning 18%. Partial failures enter `awaiting_gst_clarification`
+# on PendingBill so the user only re-types the unresolved items.
+# ════════════════════════════════════════════════════════════════════
+
+class GSTClarificationNeeded(Exception):
+    """Mirror of services.billing.GSTLookupError. A raise here tells the
+    caller to route the item through the clarification flow rather than
+    bill it at the 18% placeholder."""
+
+
+def _resolve_gst_strict(name: str, price: float, shop_id: str, client) -> dict:
+    """Strict GST resolver — raises on unknown items.
+
+    MIRROR of services/billing.py::_resolve_gst_for_item.
+    Success is `source` in {master, exact, fuzzy, cache, claude}.
+    Failure is `source == "default"` (get_gst_rate_smart's "I gave up"
+    signal) or any exception from the resolver. Behavior for resolved
+    items is unchanged from the old silent-fallback path.
+    """
+    try:
+        rate_info = get_gst_rate_smart(name, client, shop_id=shop_id)
+    except Exception as exc:
+        log.error(
+            f"GST lookup raised | item={name} | price={price} | "
+            f"shop_id={shop_id} | error={exc}",
+            exc_info=True,
+        )
+        raise GSTClarificationNeeded(name) from exc
+
+    if rate_info.get("source") == "default":
+        log.warning(
+            f"GST unknown (source=default) | item={name} | "
+            f"price={price} | shop_id={shop_id}"
+        )
+        raise GSTClarificationNeeded(name)
+
+    return adjust_gst_for_price(name, price, rate_info)
+
+
+def _partition_gst_resolutions(
+    add_items: list, shop_id: str, is_bos: bool,
+) -> tuple[list[dict], list[dict]]:
+    """Partition add_items into (valid, failed) using strict resolution.
+
+    MIRROR of the partition loop in services/billing.py::_handle_new_bill.
+    BOS items bypass the resolver entirely (no GST applies); they always
+    land in `valid` with bill_of_supply defaults — same contract as
+    services/billing.py::_apply_bos_defaults.
+    """
+    valid: list[dict] = []
+    failed: list[dict] = []
+    client = None if is_bos else get_anthropic_client()
+
+    for raw in add_items:
+        name  = str(raw.get("name") or "item").strip()
+        price = _safe_float(raw.get("price"), 0.0) or 0.0
+        qty   = _safe_float(raw.get("qty"),   1.0) or 1.0
+        qty   = max(0.01, qty)
+
+        if is_bos:
+            valid.append(_make_item_dict(
+                name, price, qty, 0, "9999", "bill_of_supply", "high", None,
+            ))
+            continue
+
+        try:
+            rate_info = _resolve_gst_strict(name, price, shop_id, client)
+        except GSTClarificationNeeded:
+            # Store in the raw shape the clarifier expects — name/qty/price
+            # only, no hsn/gst_rate. Mirrors services/billing.py which
+            # stores the full parsed-item dict on PendingBill.failed_items.
+            failed.append({"name": name, "qty": qty, "price": price})
+            continue
+
+        valid.append(_make_item_dict(
+            name, price, qty,
+            int(rate_info.get("gst", 18)),
+            str(rate_info.get("hsn", "9999")),
+            str(rate_info.get("source", "default")),
+            str(rate_info.get("confidence", "low")),
+        ))
+    return valid, failed
+
+
+def _format_failed_items_msg(failed_items: list[dict]) -> str:
+    """Mirror of services/billing.py::_format_failed_items_msg.
+    Wording MUST match across both paths — shopkeepers may hit either.
+    """
+    names = [str(i.get("name") or "?") for i in failed_items]
+    return (
+        "❌ Couldn't determine GST for:\n"
+        + "\n".join(f"- {n}" for n in names)
+        + "\n\nPlease clarify these items (e.g., *power adapter 500*)."
+    )
+
+
+def _handle_gst_clarification(
+    phone: str, bill_changes: dict, ctx: "ShopContext",
+) -> str:
+    """Resolve GST for previously-failed items using the user's clarification.
+
+    MIRROR of services/billing.py::_handle_gst_clarification. Kept in
+    lock-step so both paths behave identically. Any behavioral change
+    here MUST be applied there and vice versa.
+
+    Flow:
+      1. Use LLM-parsed add_items as the user's clarification input.
+      2. Retry strict GST resolution per item.
+      3. Accumulate successes into pending.valid_items. REPLACE
+         pending.failed_items with new failures (not merge per-name —
+         same design call as services/billing.py).
+      4. If failures remain → keep state, re-send failed-items message.
+      5. Else → promote valid_items to pending.items, clear the three
+         clarification fields, show preview.
+
+    is_return / is_bill_of_supply / pricing_type / discount fields
+    were captured in _handle_billing and are preserved across rounds.
+    """
+    pending = get_pending_bill(phone)
+    if not pending or _pending_age_mins(pending) >= _PENDING_EXPIRY_MINS:
+        return (
+            "⏰ Your bill session expired (10 min limit).\n"
+            "Please send the items again to start a new bill."
+        )
+
+    add_items = bill_changes.get("add_items") or []
+    if not add_items:
+        # LLM couldn't extract items from this turn. Re-prompt with the
+        # current outstanding list so the user knows what's still missing.
+        return (
+            "❌ I couldn't read that as items with prices.\n"
+            "_Example:_ *power adapter 500*\n\n"
+            + _format_failed_items_msg(pending.failed_items)
+        )
+
+    new_valid, still_failed = _partition_gst_resolutions(
+        add_items, pending.shop_id, pending.is_bill_of_supply,
+    )
+
+    # Accumulate successes; REPLACE failed_items (mirror design call).
+    pending.valid_items  = list(pending.valid_items) + new_valid
+    pending.failed_items = still_failed
+    pending.created_at   = datetime.utcnow()  # refresh 10-min expiry per round
+
+    if still_failed:
+        store_pending(phone, pending)
+        log.info(
+            f"{phone}: clarification round — "
+            f"{len(new_valid)} resolved, {len(still_failed)} still failing"
+        )
+        return _format_failed_items_msg(still_failed)
+
+    # All resolved → promote and exit clarification state.
+    pending.items                      = pending.valid_items
+    pending.valid_items                = []
+    pending.failed_items               = []
+    pending.awaiting_gst_clarification = False
+    pending.created_at                 = datetime.utcnow()
+    store_pending(phone, pending)
+    log.info(
+        f"{phone}: clarification complete — {len(pending.items)} item(s)"
+    )
+    return "✅ All items resolved.\n\n" + msg_preview(pending)
+
+
 def _resolve_customer_state(raw: str) -> tuple[str, str] | None:
     """Resolve a raw state string to (state_name, state_code).
 
@@ -84,6 +260,33 @@ def execute_action(result: dict, phone: str, ctx: ShopContext) -> str:
     report_range = result.get("report_range") or None
     is_dup_warn  = bool(result.get("is_duplicate_warning", False))
     is_typo_warn = bool(result.get("is_typo_warning", False))
+
+    # ── GST clarification intercept ──────────────────────────────────
+    # MIRROR of services/billing.py::_handle_confirmation's intercept.
+    # If a pending bill is waiting for the user to clarify failed items,
+    # reroute based on the LLM's classification:
+    #   cancel           → clear pending (escape hatch)
+    #   confirm          → block with nudge (nothing to confirm yet)
+    #   help/report/...  → read-only, pass through (less hostile than
+    #                      services/billing.py which blocks these)
+    #   anything else    → clarification handler, which will either
+    #                      consume add_items or re-prompt
+    _pending_check = get_pending_bill(phone)
+    if _pending_check and getattr(
+        _pending_check, "awaiting_gst_clarification", False
+    ):
+        if action == "cancel":
+            return _handle_cancel(phone, ctx, reply)
+        if action in ("confirm", "confirm_with_change"):
+            return (
+                "⚠️ Can't confirm yet — some items still need GST "
+                "clarification.\n\n"
+                + _format_failed_items_msg(_pending_check.failed_items)
+            )
+        # Read-only / informational actions fall through to normal routing.
+        if action not in ("help", "report", "greeting", "question"):
+            return _handle_gst_clarification(phone, bill_changes, ctx)
+    # ──────────────────────────────────────────────────────────────────
 
     # Prepend any LLM-generated warnings to the reply
     prefix = ""
@@ -1205,6 +1408,13 @@ def _fuzzy_find_item(
     return best_idx if best_score >= threshold else None
 
 
+# DEPRECATED for new-bill paths — prefer _partition_gst_resolutions, which
+# raises GSTClarificationNeeded instead of silently returning 18%.
+# Still used by _add_items_to_pending, _handle_confirm_with_change,
+# _resolve_gst_for_last_bill_items, _toggle_items_gst — those paths retain
+# silent-fallback semantics for now because they operate on already-resolved
+# pending bills. See services/billing.py for the full strict-resolution
+# state machine; follow-up work should migrate these callers too.
 def _resolve_gst_for_items(
     add_items: list,
     shop_id: str,
@@ -1241,6 +1451,11 @@ def _resolve_gst_for_items(
     return result
 
 
+# DEPRECATED for new-bill paths — prefer _partition_gst_resolutions, which
+# raises GSTClarificationNeeded instead of silently returning 18%.
+# Retained because load_last_bill copies items from a previously-confirmed
+# bill where GST was already valid; the silent-fallback only fires if a
+# previously-known item has since been removed from master.
 def _resolve_gst_for_last_bill_items(
     raw_items: list,
     shop_id: str,

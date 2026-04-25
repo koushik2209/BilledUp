@@ -114,8 +114,15 @@ GST_RATES = {
     "pants": {"hsn": "6203", "gst": 5},
     "jeans": {"hsn": "6203", "gst": 5},
     "saree": {"hsn": "5208", "gst": 5},
+    "sari":  {"hsn": "5208", "gst": 5},   # alt spelling of saree
     "salwar": {"hsn": "6211", "gst": 5},
-    "kurta": {"hsn": "6211", "gst": 5},
+    "kurta":  {"hsn": "6211", "gst": 5},
+    "kurtha": {"hsn": "6211", "gst": 5},  # common alt spelling (extra 'h')
+    "kurti":  {"hsn": "6211", "gst": 5},  # was in FABRIC_ALWAYS_5PCT only — added here so Step 1 exact-match hits
+    "kurthi": {"hsn": "6211", "gst": 5},  # alt spelling of kurti
+    "blouse": {"hsn": "6206", "gst": 5},  # saree blouse / women's blouse — always 5% per user spec
+    "dhoti":  {"hsn": "5208", "gst": 5},  # was in FABRIC_ALWAYS_5PCT only
+    "lungi":  {"hsn": "5208", "gst": 5},  # was in FABRIC_ALWAYS_5PCT only
     "dress": {"hsn": "6204", "gst": 5},
     "jacket": {"hsn": "6201", "gst": 5},
     "sweater": {"hsn": "6110", "gst": 5},
@@ -619,8 +626,12 @@ FOOTWEAR_KEYWORDS = {
 # no price-based slab adjustment applies regardless of value.
 # Source: CBIC FAQ, confirmed unchanged after 56th GST Council (Sep 2025)
 FABRIC_ALWAYS_5PCT = {
-    "saree", "sarees", "dupatta", "dupattas", "salwar", "kurta", "kurtis",
-    "kurti", "fabric", "cloth", "shawl", "stole", "lungi", "dhoti",
+    "saree", "sarees", "sari", "saris",
+    "dupatta", "dupattas", "salwar",
+    "kurta", "kurtha", "kurtas", "kurthas",   # alt spellings — keep 5% even if fuzzy lands on a slab-eligible cousin
+    "kurti", "kurthi", "kurtis", "kurthis",
+    "fabric", "cloth", "shawl", "stole",
+    "lungi", "lungis", "dhoti", "dhotis",
     "silk fabric", "cotton fabric", "dress material", "suit material",
 }
 

@@ -1339,7 +1339,10 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
         if db_saved and not pending.is_bill_of_supply:
             _save_shop_default_pricing(pending.shop_id, pending.is_inclusive)
 
-        # Auto-save items to shop item master (confirmed=True)
+        # Auto-save items to shop item master (confirmed=True).
+        # BOS bills pass is_bos=True so save_item_master skips entirely —
+        # otherwise gst_rate=0 entries would poison Step 0 of the
+        # get_gst_rate_smart pipeline once the shop switches to Tax Invoice.
         try:
             from database import save_item_master
             for item in bill_result.items:
@@ -1347,6 +1350,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
                     pending.shop_id, item.name,
                     item.hsn, item.gst_rate,
                     confirmed=True,
+                    is_bos=pending.is_bill_of_supply,
                 )
         except Exception as e:
             log.error(f"Item master save failed (non-fatal): {e}")

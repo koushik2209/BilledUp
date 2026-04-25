@@ -26,8 +26,24 @@ def get_item_master(shop_id: str, item_name: str) -> dict | None:
 
 
 def save_item_master(shop_id: str, item_name: str, hsn: str, gst_rate: int,
-                     confirmed: bool = False):
-    """Upsert an item in the shop's item master. Increments use_count."""
+                     confirmed: bool = False, is_bos: bool = False):
+    """Upsert an item in the shop's item master. Increments use_count.
+
+    is_bos=True signals the source bill was a Bill of Supply, where every
+    item carries gst_rate=0 by definition (no GST applies). Saving such
+    rows would either:
+      - poison new entries with 0% (next Tax Invoice bill for the same
+        shop hits Step 0 of get_gst_rate_smart and gets 0% silently), OR
+      - overwrite an existing valid rate (e.g., kurta saved at 5% from a
+        prior Tax Invoice gets clobbered to 0% by a BOS bill).
+    Both are wrong. Skip the save entirely when is_bos=True; the explicit
+    GST_RATES dict and Claude lookup will repopulate correctly when the
+    shop next bills under a Tax Invoice. use_count is intentionally NOT
+    incremented either — BOS sales don't represent GST-bearing usage.
+    """
+    if is_bos:
+        return
+
     name = item_name.lower().strip()
     with db_session() as session:
         row = session.query(ShopItemMaster).filter_by(

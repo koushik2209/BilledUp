@@ -165,6 +165,15 @@ def _check_hard_command(
 
     # ── Confirm ──────────────────────────────────
     if t in _CONFIRM_WORDS:
+        # GST clarification guard: don't shortcut "yes" while a bill is
+        # awaiting clarification — it would route to _handle_confirm and
+        # generate a zero-item bill (pending.items == [] during
+        # clarification). Fall through to LLM routing instead; the
+        # executor's clarification intercept will block confirm with the
+        # "Can't confirm yet" nudge. Mirror of the executor intercept.
+        pending = get_pending_bill(phone)
+        if pending and getattr(pending, "awaiting_gst_clarification", False):
+            return None
         return execute_action(_validate_result({"action": "confirm"}), phone, ctx)
 
     # ── Cancel ───────────────────────────────────
@@ -173,6 +182,13 @@ def _check_hard_command(
 
     # ── Edit / redo ───────────────────────────────
     if t in ("edit", "change", "redo"):
+        # GST clarification guard: same reason as confirm — let the
+        # executor intercept handle the in-clarification semantics
+        # consistently (a future change to those semantics shouldn't need
+        # to be mirrored here).
+        pending = get_pending_bill(phone)
+        if pending and getattr(pending, "awaiting_gst_clarification", False):
+            return None
         return _handle_edit(phone, ctx)
 
     # ── Help ─────────────────────────────────────

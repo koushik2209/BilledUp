@@ -11,6 +11,8 @@ import string
 import logging
 from datetime import datetime, timedelta
 
+from rapidfuzz import fuzz
+
 from config import PLATFORM_NAME, BASE_URL, get_anthropic_client
 from whatsapp_client import send_text_message, send_document_by_link
 from claude_parser import parse_message
@@ -186,6 +188,55 @@ def _format_failed_items_msg(failed_items: list) -> str:
         "❌ Couldn't determine GST for:\n"
         + "\n".join(f"- {name}" for name in failed_items)
         + "\n\nPlease clarify these items."
+    )
+
+
+def _any_name_match(target: str, candidates: list[str]) -> bool:
+    """Fuzzy item-name match used by _handle_gst_clarification to detect
+    items the user dropped silently by sending fewer clarifications than
+    asked for.
+
+    Returns True if `target` plausibly refers to any of the `candidates`.
+    Tries (in order): equality → substring → token overlap → rapidfuzz
+    WRatio ≥ 75. The threshold matches FUZZY_THRESHOLD in core/gst_rates.py.
+
+    MIRROR: same helper in conversation/executor.py — keep both in sync.
+    """
+    if not target:
+        return False
+    target = target.strip().lower()
+    if not target:
+        return False
+    for c in candidates:
+        if not c:
+            continue
+        c = c.strip().lower()
+        if not c:
+            continue
+        if target == c:
+            return True
+        if target in c or c in target:
+            return True
+        if set(target.split()) & set(c.split()):
+            return True
+        if fuzz.WRatio(target, c) >= 75:
+            return True
+    return False
+
+
+def _format_dropped_warning(dropped: list[str]) -> str:
+    """Build the "⚠️ Not included (not restated)" block prepended to the
+    final clarification preview. Empty string if nothing dropped.
+
+    MIRROR: same helper in conversation/executor.py — keep in sync.
+    """
+    if not dropped:
+        return ""
+    names = ", ".join(f"*{n}*" for n in dropped)
+    return (
+        "\n\n⚠️ *Not included (not restated):* " + names
+        + "\n_Send their name + price now to add them, or type *YES* to "
+        + "confirm without them._"
     )
 
 
@@ -862,9 +913,21 @@ def _handle_gst_clarification(
 
     The user's clarification fully replaces the previously-failed items; it is
     not merged per-name (too unreliable). If the user restates fewer items
-    than failed, the missing ones are dropped.
+    than failed, the missing ones are dropped — but the FINAL preview now
+    surfaces them with a "Not included (not restated)" warning so the user
+    sees exactly what's about to be billed before sending YES.
     """
     try:
+        # Snapshot the names we're asking the user to clarify THIS round.
+        # If the user's reply doesn't reference one of these, that original
+        # item is silently dropped from the bill — the final summary lists
+        # them so the user can decide to restate or accept the drop.
+        asked_about: list[str] = [
+            (i.get("name") or "").strip()
+            for i in pending.failed_items
+            if (i.get("name") or "").strip()
+        ]
+
         parsed = parse_message(message)
 
         # Bad input → keep state, re-prompt with the current failed set.
@@ -914,6 +977,25 @@ def _handle_gst_clarification(
             return
 
         # ── All resolved → promote to pending.items and exit clarification ──
+        # Compute dropped originals BEFORE promoting: an asked-about name
+        # is "dropped" if no item the user mentioned this round fuzzy-matches
+        # it. The user sees these explicitly in the final preview so they
+        # can restate before YES, or accept the drop and confirm.
+        user_mentioned: list[str] = [
+            (i.get("name") or "").strip()
+            for i in parsed["items"]
+            if (i.get("name") or "").strip()
+        ]
+        dropped: list[str] = [
+            orig for orig in asked_about
+            if not _any_name_match(orig, user_mentioned)
+        ]
+        if dropped:
+            log.info(
+                f"GST clarification: {len(dropped)} original(s) dropped "
+                f"by phone={from_number}: {dropped}"
+            )
+
         bill_items = pending.valid_items
         if pending.is_return:
             bill_items = negate_items(bill_items)
@@ -931,7 +1013,13 @@ def _handle_gst_clarification(
 
         _assert_bos_invariant(pending.items, pending.is_bill_of_supply)
         store_pending(from_number, pending)
-        send(from_number, "✅ All items resolved.\n\n" + msg_preview(pending))
+        send(
+            from_number,
+            "✅ All items resolved."
+            + _format_dropped_warning(dropped)
+            + "\n\n"
+            + msg_preview(pending),
+        )
 
     except Exception as e:
         log.error(
@@ -980,10 +1068,18 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
 
     # ── GST clarification intercept ──
     # If the pending bill is still waiting for the user to clarify items that
-    # failed GST lookup, re-route everything here. CANCEL and EDIT remain
-    # escape hatches; a plain YES is nonsensical (nothing to confirm yet) so
-    # we nudge the user back to the outstanding items.
+    # failed GST lookup, re-route everything here. Three classes of input:
+    #   1. ESCAPE HATCHES — cancel / edit clear pending; yes is blocked
+    #      because there is nothing to confirm yet (pending.items is []).
+    #   2. READ-ONLY COMMANDS — help / today / history / gst report /
+    #      myitems all run normally. A confused shopkeeper typing 'help'
+    #      needs help MORE during clarification, not less. None of these
+    #      touch pending state, and we refresh `created_at` so the
+    #      10-minute expiry does not fire while the user is browsing.
+    #   3. ANYTHING ELSE — delegated to _handle_gst_clarification, which
+    #      either consumes the message as items or re-prompts.
     if getattr(pending, "awaiting_gst_clarification", False):
+        # 1. Escape hatches.
         if msg_lower in ("cancel", "no", "discard"):
             clear_pending(from_number)
             send(from_number, "❌ Bill discarded.\n\nSend a new message to create another bill.")
@@ -1000,6 +1096,36 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
                  "⚠️ Can't confirm yet — some items still need GST clarification.\n\n"
                  + _format_failed_items_msg(names))
             return
+
+        # 2. Read-only commands — pass through and refresh expiry.
+        shop_id   = pending.shop_id
+        shop_name = pending.shop_name or reg.get("shop_name", "Shop")
+        handled   = False
+        if msg_lower in ("help", "?", "h"):
+            from api.formatters import msg_help as _msg_help
+            send(from_number, _msg_help(shop_name, d_left))
+            handled = True
+        elif msg_lower in ("today", "aaj", "today's sales", "aaj ka"):
+            send(from_number, msg_today_summary(shop_id, shop_name, d_left))
+            handled = True
+        elif msg_lower in ("history", "bills", "recent"):
+            send(from_number, msg_history(shop_id))
+            handled = True
+        elif msg_lower.startswith("gst report") or msg_lower == "report":
+            _handle_gst_report(from_number, msg_lower, shop_id, shop_name)
+            handled = True
+        elif msg_lower in ("myitems", "my items", "my_items", "items"):
+            _handle_myitems(from_number, shop_id)
+            handled = True
+
+        if handled:
+            # Refresh the 10-min clock so the user has time to come back
+            # and answer the clarification question after browsing.
+            pending.created_at = datetime.utcnow()
+            store_pending(from_number, pending)
+            return
+
+        # 3. Catch-all → clarification handler.
         _handle_gst_clarification(from_number, message, pending)
         return
 

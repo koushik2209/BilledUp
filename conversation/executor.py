@@ -151,6 +151,48 @@ def _format_failed_items_msg(failed_items: list[dict]) -> str:
     )
 
 
+def _any_name_match(target: str, candidates: list[str]) -> bool:
+    """Fuzzy item-name match used by _handle_gst_clarification to detect
+    silently-dropped items.
+
+    MIRROR of services/billing.py::_any_name_match — keep in sync.
+    Returns True if `target` plausibly refers to any candidate. Tries
+    equality → substring → token overlap → rapidfuzz WRatio ≥ 75.
+    """
+    if not target:
+        return False
+    target = target.strip().lower()
+    if not target:
+        return False
+    for c in candidates:
+        if not c:
+            continue
+        c = c.strip().lower()
+        if not c:
+            continue
+        if target == c:
+            return True
+        if target in c or c in target:
+            return True
+        if set(target.split()) & set(c.split()):
+            return True
+        if fuzz.WRatio(target, c) >= 75:
+            return True
+    return False
+
+
+def _format_dropped_warning(dropped: list[str]) -> str:
+    """MIRROR of services/billing.py::_format_dropped_warning."""
+    if not dropped:
+        return ""
+    names = ", ".join(f"*{n}*" for n in dropped)
+    return (
+        "\n\n⚠️ *Not included (not restated):* " + names
+        + "\n_Send their name + price now to add them, or type *YES* to "
+        + "confirm without them._"
+    )
+
+
 def _handle_gst_clarification(
     phone: str, bill_changes: dict, ctx: "ShopContext",
 ) -> str:
@@ -180,6 +222,16 @@ def _handle_gst_clarification(
             "Please send the items again to start a new bill."
         )
 
+    # Snapshot the names we're asking the user to clarify THIS round, BEFORE
+    # any mutation. Used to detect silently-dropped originals when the user
+    # restates fewer items than were failing. Mirror of the same snapshot
+    # in services/billing.py::_handle_gst_clarification.
+    asked_about: list[str] = [
+        (i.get("name") or "").strip()
+        for i in pending.failed_items
+        if (i.get("name") or "").strip()
+    ]
+
     add_items = bill_changes.get("add_items") or []
     if not add_items:
         # LLM couldn't extract items from this turn. Re-prompt with the
@@ -208,6 +260,23 @@ def _handle_gst_clarification(
         return _format_failed_items_msg(still_failed)
 
     # All resolved → promote and exit clarification state.
+    # Compute dropped originals BEFORE promoting (an asked-about name is
+    # "dropped" if no item the user mentioned this round fuzzy-matches
+    # it). The user sees these in the final preview so they can restate
+    # before YES, or accept the drop and confirm.
+    user_mentioned: list[str] = [
+        str(i.get("name") or "").strip() for i in add_items
+        if str(i.get("name") or "").strip()
+    ]
+    dropped: list[str] = [
+        orig for orig in asked_about
+        if not _any_name_match(orig, user_mentioned)
+    ]
+    if dropped:
+        log.info(
+            f"{phone}: clarification dropped {len(dropped)} original(s): {dropped}"
+        )
+
     pending.items                      = pending.valid_items
     pending.valid_items                = []
     pending.failed_items               = []
@@ -217,7 +286,12 @@ def _handle_gst_clarification(
     log.info(
         f"{phone}: clarification complete — {len(pending.items)} item(s)"
     )
-    return "✅ All items resolved.\n\n" + msg_preview(pending)
+    return (
+        "✅ All items resolved."
+        + _format_dropped_warning(dropped)
+        + "\n\n"
+        + msg_preview(pending)
+    )
 
 
 def _resolve_customer_state(raw: str) -> tuple[str, str] | None:
@@ -284,7 +358,15 @@ def execute_action(result: dict, phone: str, ctx: ShopContext) -> str:
                 + _format_failed_items_msg(_pending_check.failed_items)
             )
         # Read-only / informational actions fall through to normal routing.
-        if action not in ("help", "report", "greeting", "question"):
+        # Mirror of services/billing.py::_handle_confirmation read-only
+        # allowlist — keep the two paths in sync.
+        if action in ("help", "report", "greeting", "question"):
+            # Refresh the 10-min expiry so the user has time to come
+            # back and answer the clarification after browsing.
+            _pending_check.created_at = datetime.utcnow()
+            store_pending(phone, _pending_check)
+            # Fall through to normal action dispatch below.
+        else:
             return _handle_gst_clarification(phone, bill_changes, ctx)
     # ──────────────────────────────────────────────────────────────────
 
@@ -623,25 +705,32 @@ def _handle_confirm_with_change(
     ctx: ShopContext,
     reply: str,
 ) -> str:
-    """Apply changes to pending bill then immediately confirm."""
+    """Apply changes to the pending bill and SHOW UPDATED PREVIEW.
+
+    UX rule: edit commands NEVER auto-confirm. Even when the LLM
+    classifies a multi-edit message as ``confirm_with_change`` (e.g.
+    "Add kurta 500 remove pant 600" — no explicit YES word), we treat
+    it as an edit and require an explicit YES/CONFIRM to generate the
+    bill. This prevents the LLM from short-circuiting an edit-only
+    message into a finalized bill.
+
+    All change fields (add_items, update_items, remove_item +
+    set_customer / set_discount / set_pricing_type / set_bill_type
+    via _apply_bill_changes) are still APPLIED here — only the
+    auto-confirm step at the end is removed. The user must send YES
+    or CONFIRM as a separate message to generate the bill.
+    """
     try:
         pending = get_pending_bill(phone)
         if not pending or _pending_age_mins(pending) >= _PENDING_EXPIRY_MINS:
             return _no_pending_reply(ctx)
 
-        # Apply all changes first
+        # Apply customer / discount / pricing / bill_type changes.
         pending = _apply_bill_changes(pending, bill_changes)
 
-        # Handle extra add_items
-        extra_adds = bill_changes.get("add_items") or []
-        if extra_adds:
-            shop_id   = _derive_shop_id(phone)
-            new_items = _resolve_gst_for_items(
-                extra_adds, shop_id, pending.is_bill_of_supply
-            )
-            pending.items.extend(new_items)
+        change_summary: list[str] = []
 
-        # Handle update_items
+        # Handle update_items (price / qty changes on existing items).
         for upd in (bill_changes.get("update_items") or []):
             search = (upd.get("name") or "").strip()
             if not search:
@@ -654,13 +743,29 @@ def _handle_confirm_with_change(
                     pending.items[idx]["price"] = new_price
                 if new_qty and new_qty > 0:
                     pending.items[idx]["qty"] = new_qty
+                change_summary.append(f"updated *{pending.items[idx]['name']}*")
 
-        # Handle remove_item
+        # Handle extra add_items.
+        extra_adds = bill_changes.get("add_items") or []
+        if extra_adds:
+            shop_id   = _derive_shop_id(phone)
+            new_items = _resolve_gst_for_items(
+                extra_adds, shop_id, pending.is_bill_of_supply
+            )
+            pending.items.extend(new_items)
+            change_summary.append(
+                "added " + ", ".join(f"*{i['name']}*" for i in new_items)
+            )
+
+        # Handle remove_item (last so it can target newly-added items
+        # by name if the LLM unusually asked to add and remove the same).
         remove_name = (bill_changes.get("remove_item") or "").strip()
         if remove_name:
             idx = _fuzzy_find_item(remove_name, pending.items, _FUZZY_REMOVE_THRESH)
             if idx is not None:
+                removed = pending.items[idx].get("name", remove_name)
                 pending.items = [i for j, i in enumerate(pending.items) if j != idx]
+                change_summary.append(f"removed *{removed}*")
 
         if not pending.items:
             clear_pending(phone)
@@ -668,8 +773,15 @@ def _handle_confirm_with_change(
 
         pending.created_at = datetime.utcnow()
         store_pending(phone, pending)
-        # Now confirm
-        return _handle_confirm(phone, ctx, reply)
+
+        # Show updated preview — explicit YES/CONFIRM is the ONLY path
+        # to bill generation. This is the entire point of the fix:
+        # edit-only messages must not auto-confirm even if the LLM
+        # tagged them as confirm_with_change.
+        header = ""
+        if change_summary:
+            header = "✅ " + ", ".join(change_summary).capitalize() + ".\n\n"
+        return header + msg_preview(pending)
 
     except Exception as exc:
         log.error(f"_handle_confirm_with_change failed for {phone}: {exc}", exc_info=True)

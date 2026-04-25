@@ -197,6 +197,7 @@ def _check_hard_command(
 
     # ── My items ─────────────────────────────────
     if t in ("myitems", "my items", "my_items", "items"):
+        _refresh_clarification_expiry(phone)
         return _handle_myitems(phone, ctx)
 
     # ── GST report (with optional range) ─────────
@@ -261,16 +262,19 @@ def _check_hard_command(
             data = get_daily_summary_data(shop_id, datetime.now(IST).date())
         except ValueError:
             return "Sorry, I couldn't find your shop details. Please contact support."
+        _refresh_clarification_expiry(phone)
         return format_daily_summary(data)
 
     # ── Today summary (legacy format) ────────────
     if t in ("today", "aaj", "today's sales", "aaj ka"):
         shop_id = _derive_shop_id(phone)
+        _refresh_clarification_expiry(phone)
         return msg_today_summary(shop_id, ctx.shop_name, ctx.trial_days_left)
 
     # ── Bill history ──────────────────────────────
     if t in ("history", "bills", "recent"):
         shop_id = _derive_shop_id(phone)
+        _refresh_clarification_expiry(phone)
         return msg_history(shop_id)
 
     # ── Greeting → help ───────────────────────────
@@ -712,6 +716,30 @@ def _safe_float(value, default):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _refresh_clarification_expiry(phone: str) -> None:
+    """Refresh pending.created_at if a bill is in clarification state.
+
+    Called from read-only command paths (today / history / summary /
+    myitems / gst report — the ones that return directly from
+    _check_hard_command without going through execute_action). These
+    commands don't touch pending state, so the clarification survives —
+    but the 10-min expiry would otherwise tick down silently while the
+    user is browsing. Refresh so the user has 10 min from THIS read to
+    return and answer the clarification question.
+
+    No-op if no pending bill exists or if pending is not in
+    clarification state. Failures are logged and swallowed — never
+    block a read-only command on a refresh failure.
+    """
+    try:
+        pending = get_pending_bill(phone)
+        if pending and getattr(pending, "awaiting_gst_clarification", False):
+            pending.created_at = datetime.utcnow()
+            store_pending(phone, pending)
+    except Exception as exc:
+        log.warning(f"_refresh_clarification_expiry failed for {phone}: {exc}")
 
 
 # ─────────────────────────────────────────────

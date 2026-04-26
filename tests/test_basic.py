@@ -370,13 +370,15 @@ def test_preview_shows_gst_rate_per_item():
         created_at=datetime.now(),
     )
     preview = msg_preview(pending)
-    # Exact match item — no warning marker
+    # New per-item format (RULE 2): "Rs.X + Rs.Y GST = Rs.Z" — shows the
+    # GST AMOUNT explicitly rather than just the rate. The "18%" rate is
+    # implicit in the math (53.82 / 299 = 0.18, 90 / 500 = 0.18) and the
+    # grouped warning still says "default 18%" for the low-confidence item.
     assert "phone case" in preview
-    assert "18% GST" in preview
-    # Default match item — has warning marker
+    assert "Rs.299.00 + Rs.53.82 GST = Rs.352.82" in preview
+    # Default match item — line ends in ⚠️
     assert "unknown gadget" in preview
-    # Should have prominent default-GST warning for unknown item
-    assert "unknown gadget" in preview.lower()
+    assert "Rs.500.00 + Rs.90.00 GST = Rs.590.00 ⚠️" in preview
     assert "gst assumed" in preview.lower() or "default 18%" in preview.lower()
     # Should show GST override hint (both index and name formats)
     assert "GST 1 12" in preview

@@ -328,7 +328,15 @@ def _build_bill_items(pending: PendingBill) -> list:
 
 
 def _compute_preview_totals(pending: PendingBill) -> dict:
-    """Run calculate_bill on pending items to get GST breakdown for preview."""
+    """Run calculate_bill on pending items to get GST breakdown for preview.
+
+    Returns the BillResult.items list (positive values, sign applied at
+    display time) under the `processed_items` key so msg_preview can
+    render exact post-discount post-GST per-item amounts — matching what
+    msg_bill_summary will show after YES. Without this, the preview shows
+    raw input prices while the final bill shows discounted totals,
+    confusing the shopkeeper.
+    """
     try:
         items = _build_bill_items(pending)
         br = calculate_bill(
@@ -360,10 +368,100 @@ def _compute_preview_totals(pending: PendingBill) -> dict:
             "taxable_amount": br.taxable_amount * sign,
             "bill_discount_type":  br.bill_discount_type,
             "bill_discount_value": br.bill_discount_value,
+            # Per-item BillItems with calculate_bill's exact post-discount
+            # post-GST math. Values are POSITIVE; msg_preview applies the
+            # negative sign for return bills at display time.
+            "processed_items": br.items,
         }
     except Exception as e:
         log.warning(f"Preview totals failed: {e}")
         return None
+
+
+def _format_preview_item_line(
+    *,
+    index: int,
+    raw_item: dict,
+    processed_item,
+    is_bos: bool,
+    is_inclusive: bool,
+    is_return: bool,
+) -> tuple[str, bool]:
+    """Format ONE per-item line for the preview using calculate_bill's
+    post-discount post-GST math.
+
+    Returns (line, has_low_confidence). The line ends in `⚠️` for
+    default/low-confidence items, `~` for medium/fuzzy, nothing for
+    exact/master/manual matches.
+
+    Shape (per RULE 2):
+      Exclusive : "Pants x1 — Rs.570.00 + Rs.28.50 GST = Rs.598.50"
+      BOS       : "Pants x1 — Rs.570.00 (no GST)"
+      Inclusive : "Pants x1 — Rs.598.50 (incl. Rs.28.50 GST)"
+      Return    : same shapes, with "-" prefix on every Rs. amount that
+                  carries economic value (the breakdown stays in absolute
+                  terms — see msg_bill_summary for the equivalent rule).
+    """
+    qty = (
+        int(raw_item["qty"])
+        if raw_item["qty"] == int(raw_item["qty"])
+        else raw_item["qty"]
+    )
+    sign_str = "-" if is_return else ""
+
+    # Item-level discount marker — preserved from prior behavior.
+    i_disc_type = (raw_item.get("item_discount_type") or "none").lower()
+    i_disc_val  = float(raw_item.get("item_discount_value") or 0.0)
+    if i_disc_type == "percent" and i_disc_val > 0:
+        disc_tag = f" (-{i_disc_val:g}% off)"
+    elif i_disc_type == "flat" and i_disc_val > 0:
+        disc_tag = f" (-Rs.{i_disc_val:g})"
+    else:
+        disc_tag = ""
+
+    # Confidence marker — moved to end of line so the new per-item
+    # breakdown reads cleanly.
+    confidence = raw_item.get("gst_confidence", raw_item.get("gst_source", ""))
+    if confidence in ("low", "default"):
+        conf_marker      = " ⚠️"
+        has_low_confidence = True
+    elif confidence in ("medium", "fuzzy"):
+        conf_marker      = " ~"
+        has_low_confidence = False
+    else:
+        conf_marker      = ""
+        has_low_confidence = False
+
+    name   = raw_item["name"]
+    amount = abs(processed_item.amount)
+    total  = abs(processed_item.total)
+    gst    = abs(round(processed_item.total - processed_item.amount, 2))
+
+    if is_bos:
+        line = (
+            f"  {index}. {name} x{qty}{disc_tag} — "
+            f"{sign_str}Rs.{amount:.2f} (no GST){conf_marker}"
+        )
+    elif is_inclusive:
+        # The (incl. Rs.X GST) value describes the embedded GST inside
+        # the total; it stays unsigned (it's a magnitude) — the SIGN
+        # lives on the leading total which is what the user pays/refunds.
+        line = (
+            f"  {index}. {name} x{qty}{disc_tag} — "
+            f"{sign_str}Rs.{total:.2f} (incl. Rs.{gst:.2f} GST){conf_marker}"
+        )
+    else:
+        # Exclusive breakdown: every Rs. carries the same sign so the
+        # arithmetic reads correctly for returns:
+        #     -Rs.500 + -Rs.25 GST = -Rs.525    ✓ (algebraically true)
+        # rather than:
+        #     -Rs.500 + Rs.25 GST = -Rs.525     ✗ (visually broken)
+        line = (
+            f"  {index}. {name} x{qty}{disc_tag} — "
+            f"{sign_str}Rs.{amount:.2f} + {sign_str}Rs.{gst:.2f} GST = "
+            f"{sign_str}Rs.{total:.2f}{conf_marker}"
+        )
+    return line, has_low_confidence
 
 
 def msg_preview(pending: PendingBill) -> str:
@@ -400,45 +498,87 @@ def msg_preview(pending: PendingBill) -> str:
         if pending.state_assumed:
             lines.append(f"_If different, reply:_ *STATE*")
 
-    # ── Items ──
+    # ── Compute totals UPFRONT ──
+    # Done before the items loop because we need processed_items (the
+    # post-discount post-GST BillItem list from calculate_bill) to
+    # render each per-item line. Totals dict is reused below in the
+    # totals block — that block is unchanged (RULE 3).
+    totals          = _compute_preview_totals(pending)
+    processed_items = totals.get("processed_items") if totals else None
+
+    # ── RULE 7: per-item sum must equal calculate_bill's grand_total ──
+    # Catches drift if msg_preview math ever falls out of sync with
+    # calculate_bill. Soft check — log loudly but never crash on
+    # preview rendering.
+    if processed_items and totals:
+        per_item_sum = round(sum(p.total for p in processed_items), 2)
+        bill_grand   = round(abs(totals["grand_total"]), 2)
+        if abs(per_item_sum - bill_grand) >= 0.01:
+            log.error(
+                f"Preview/bill total mismatch: "
+                f"per-item-sum={per_item_sum:.2f} vs grand_total={bill_grand:.2f}"
+            )
+            assert abs(per_item_sum - bill_grand) < 0.01, (
+                f"Preview/bill total mismatch: "
+                f"{per_item_sum:.2f} vs {bill_grand:.2f}"
+            )
+
+    # ── Items (post-discount post-GST per-line — matches final bill) ──
     lines.append(f"\n*{'Return Items' if pending.is_return else 'Items'}:*")
     has_low_confidence = False
-    for i, item in enumerate(pending.items, 1):
-        qty = int(item["qty"]) if item["qty"] == int(item["qty"]) else item["qty"]
-        display_price = abs(item["price"])
-        sign = "-" if pending.is_return else ""
 
-        # Item-level discount marker (percent or flat)
-        i_disc_type = (item.get("item_discount_type") or "none").lower()
-        i_disc_val  = float(item.get("item_discount_value") or 0.0)
-        if i_disc_type == "percent" and i_disc_val > 0:
-            disc_tag = f" (-{i_disc_val:g}% off)"
-        elif i_disc_type == "flat" and i_disc_val > 0:
-            disc_tag = f" (-Rs.{i_disc_val:g})"
-        else:
-            disc_tag = ""
-
-        if pending.is_bill_of_supply:
-            # No GST info shown for Bill of Supply
-            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}{disc_tag}")
-        else:
-            rate = item.get("gst_rate", 18)
-            confidence = item.get("gst_confidence", item.get("gst_source", ""))
-            if confidence == "low" or confidence == "default":
-                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}{disc_tag} ({rate}% GST ⚠️)")
-                has_low_confidence = True
-            elif confidence == "medium" or confidence == "fuzzy":
-                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}{disc_tag} ({rate}% GST ~)")
+    if processed_items and len(processed_items) == len(pending.items):
+        # Happy path — render with calculate_bill's exact math.
+        for i, (raw, proc) in enumerate(
+            zip(pending.items, processed_items), 1
+        ):
+            line, line_low_conf = _format_preview_item_line(
+                index=i, raw_item=raw, processed_item=proc,
+                is_bos=pending.is_bill_of_supply,
+                is_inclusive=pending.is_inclusive,
+                is_return=pending.is_return,
+            )
+            lines.append(line)
+            has_low_confidence = has_low_confidence or line_low_conf
+    else:
+        # Fallback — calculate_bill failed or returned a different
+        # item count. Show raw input prices so the preview is at
+        # least readable; the totals block below renders the
+        # "Totals could not be calculated" warning.
+        sign_str = "-" if pending.is_return else ""
+        for i, item in enumerate(pending.items, 1):
+            qty = (
+                int(item["qty"]) if item["qty"] == int(item["qty"])
+                else item["qty"]
+            )
+            display_price = abs(item["price"])
+            i_disc_type = (item.get("item_discount_type") or "none").lower()
+            i_disc_val  = float(item.get("item_discount_value") or 0.0)
+            if i_disc_type == "percent" and i_disc_val > 0:
+                disc_tag = f" (-{i_disc_val:g}% off)"
+            elif i_disc_type == "flat" and i_disc_val > 0:
+                disc_tag = f" (-Rs.{i_disc_val:g})"
             else:
-                lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f}{disc_tag} ({rate}% GST)")
+                disc_tag = ""
+            confidence = item.get("gst_confidence", item.get("gst_source", ""))
+            if confidence in ("low", "default"):
+                has_low_confidence = True
+                conf_marker = " ⚠️"
+            elif confidence in ("medium", "fuzzy"):
+                conf_marker = " ~"
+            else:
+                conf_marker = ""
+            lines.append(
+                f"  {i}. {item['name']} x{qty} — "
+                f"{sign_str}Rs.{display_price:.2f}{disc_tag}{conf_marker}"
+            )
 
     # ── Single grouped warning for low-confidence items ──
     if has_low_confidence:
         lines.append(f"\n⚠️ GST assumed for some items (default 18%). Verify if needed.")
         lines.append(f"_Fix: *GST 1 12* or *shirt gst 12*_")
 
-    # ── Totals ──
-    totals = _compute_preview_totals(pending)
+    # ── Totals (RULE 3 — unchanged) ──
     if totals:
         sign = "-" if pending.is_return else ""
         bdt = (pending.bill_discount_type or "none").lower()

@@ -89,15 +89,29 @@ def generate_pdf_bill(
     bill_discount_type:  str   = "none",
     bill_discount_value: float = 0.0,
     bill_of_supply: bool = False,
+    compress:       int  = 1,
 ) -> tuple[bytes, BillResult]:
     """
     Generate a GST bill PDF in memory.
     Returns (pdf_bytes, bill_result).
 
-    Bill type:
+    Bill type — driven by the EXPLICIT `bill_of_supply` parameter, not by
+    `shop.has_gstin`:
     - is_return=True       → CREDIT NOTE
-    - Shop WITH GSTIN      → TAX INVOICE
-    - Shop WITHOUT GSTIN   → BILL OF SUPPLY
+    - bill_of_supply=False → TAX INVOICE (with HSN + GST columns)
+    - bill_of_supply=True  → BILL OF SUPPLY (no HSN/GST columns)
+
+    `shop.has_gstin` is now ONLY consulted for the optional "GSTIN: …"
+    line on the shop-info block — a separate concern from layout.
+    Previously the PDF rendered as BILL OF SUPPLY whenever `shop.has_gstin`
+    was False, even with `bill_of_supply=False` — desync between
+    `Shop.gstin` and `Registration.invoice_type` (e.g., from a partial
+    `update_shop_gstin` write) would silently flip the PDF to BOS while
+    the WhatsApp summary correctly said "Tax Invoice". The explicit
+    param removes that drift.
+
+    `compress=1` (default) compresses content streams. Tests can pass
+    `compress=0` to enable byte-grep assertions on the rendered PDF.
     """
     log.info(f"Generating {'credit note' if is_return else 'bill'} {invoice_number} for {shop.name}")
     shop.validate()
@@ -144,7 +158,7 @@ def generate_pdf_bill(
         buffer, pagesize=A4,
         rightMargin=14*mm, leftMargin=14*mm,
         topMargin=12*mm, bottomMargin=12*mm,
-        compress=1,
+        compress=compress,
     )
 
     s     = _styles()
@@ -153,12 +167,18 @@ def generate_pdf_bill(
     HW    = PAGE_W / 2
 
     # ── HEADER: Shop name (left) + Doc type (right) ──
+    # Doc type driven by the explicit bill_of_supply param, NOT shop.has_gstin.
+    # See docstring for the desync-bug history.
+    is_tax_invoice = not bill_of_supply
     if is_return:
         doc_type = "CREDIT NOTE"
         doc_sub  = "Return / Refund"
+    elif is_tax_invoice:
+        doc_type = "TAX INVOICE"
+        doc_sub  = "GST Registered"
     else:
-        doc_type = shop.invoice_type
-        doc_sub  = "GST Registered" if shop.has_gstin else "Unregistered"
+        doc_type = "BILL OF SUPPLY"
+        doc_sub  = "Unregistered"
 
     ht = Table([[
         [
@@ -247,21 +267,37 @@ def generate_pdf_bill(
     story.append(Spacer(1, 4*mm))
 
     # ── ITEMS TABLE ──
-    if shop.has_gstin and not bill.is_igst:
+    # Layout driven by bill_of_supply param (NOT shop.has_gstin) so the
+    # column choice can never disagree with the document type.
+    if is_tax_invoice and not bill.is_igst:
         cw = [8*mm, 48*mm, 14*mm, 10*mm, 20*mm, 20*mm, 10*mm, 16*mm, 16*mm, 20*mm]
         hdr = ["S.No", "Description", "HSN", "Qty", "Price", "Amount", "GST%", "CGST", "SGST", "Total"]
-    elif shop.has_gstin and bill.is_igst:
+    elif is_tax_invoice and bill.is_igst:
         cw = [8*mm, 52*mm, 14*mm, 10*mm, 22*mm, 22*mm, 10*mm, 22*mm, 22*mm]
         hdr = ["S.No", "Description", "HSN", "Qty", "Price", "Amount", "GST%", "IGST", "Total"]
     else:
         cw = [10*mm, 82*mm, 20*mm, 30*mm, 40*mm]
         hdr = ["S.No", "Description", "Qty", "Price", "Amount"]
 
+    # Layout-vs-doc-type invariant. If we ever build the BOS layout for a
+    # Tax Invoice (or vice versa), fail loudly — that's the bug class
+    # this whole change was made to prevent.
+    if is_tax_invoice and not is_return:
+        if "HSN" not in hdr:
+            raise ValueError(
+                f"PDF layout drift: bill_of_supply=False but items table "
+                f"missing HSN column. doc_type={doc_type!r}, hdr={hdr!r}"
+            )
+        if doc_type != "TAX INVOICE":
+            raise ValueError(
+                f"PDF layout drift: bill_of_supply=False but doc_type={doc_type!r}"
+            )
+
     rows = [[Paragraph(h, s["th"]) for h in hdr]]
 
     for idx, item in enumerate(bill.items, 1):
         qty_str = str(int(item.qty)) if item.qty == int(item.qty) else str(item.qty)
-        if shop.has_gstin and not bill.is_igst:
+        if is_tax_invoice and not bill.is_igst:
             rows.append([
                 Paragraph(str(idx),                       s["td"]),
                 Paragraph(xml_escape(item.name),          s["td"]),
@@ -274,7 +310,7 @@ def generate_pdf_bill(
                 Paragraph(f"Rs.{item.sgst:.2f}",          s["td"]),
                 Paragraph(f"Rs.{item.total:.2f}",         s["td_bold"]),
             ])
-        elif shop.has_gstin and bill.is_igst:
+        elif is_tax_invoice and bill.is_igst:
             rows.append([
                 Paragraph(str(idx),                       s["td"]),
                 Paragraph(xml_escape(item.name),          s["td"]),
@@ -347,13 +383,15 @@ def generate_pdf_bill(
              Paragraph(f"Rs.{bill.subtotal:.2f}", s["total_value"])]
         ]
 
-    if shop.has_gstin and not bill.is_igst:
+    # Totals layout — driven by bill_of_supply param, same reason as
+    # the items table above. shop.has_gstin is decoupled from layout.
+    if is_tax_invoice and not bill.is_igst:
         totals_data = _disc_rows + _subtotal_row + [
             ["", Paragraph("CGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_cgst:.2f}", s["total_value"])],
             ["", Paragraph("SGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_sgst:.2f}", s["total_value"])],
             ["", Paragraph("Total GST",      s["total_label"]), Paragraph(f"Rs.{bill.total_gst:.2f}",  s["total_value"])],
         ]
-    elif shop.has_gstin and bill.is_igst:
+    elif is_tax_invoice and bill.is_igst:
         totals_data = _disc_rows + _subtotal_row + [
             ["", Paragraph("IGST collected", s["total_label"]), Paragraph(f"Rs.{bill.total_igst:.2f}", s["total_value"])],
             ["", Paragraph("Total GST",      s["total_label"]), Paragraph(f"Rs.{bill.total_gst:.2f}",  s["total_value"])],
@@ -421,6 +459,7 @@ def generate_pdf_bill(
     if size_kb > 500:
         log.warning(f"Bill is {size_kb:.0f}KB — may be slow on WhatsApp")
 
+    bill.doc_type = doc_type
     return pdf_bytes, bill
 
 

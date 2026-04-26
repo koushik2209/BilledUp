@@ -20,7 +20,7 @@ from gst_rates import get_gst_rate_smart, adjust_gst_for_price
 from bill_generator import (
     ShopProfile, CustomerInfo, BillItem,
     generate_invoice_number, generate_pdf_bill, calculate_bill,
-    PLACEHOLDER_GSTIN, VALID_GST_SLABS,
+    PLACEHOLDER_GSTIN, VALID_GST_SLABS, GSTIN_REGEX,
 )
 from database import db_session, Bill, ReportPDF, Shop
 from reports import (
@@ -1531,6 +1531,50 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
                 state_code = pending.shop_state_code,
                 upi        = "",
             )
+
+        # ── GSTIN sync safety net ──────────────────────────────────
+        # Tax Invoice intent (pending.is_bill_of_supply == False) requires
+        # the shop to have a valid GSTIN on the printed PDF. Shop.gstin
+        # and Registration.gstin can desync (update_shop_gstin uses two
+        # separate sessions and silently logs if the second write fails),
+        # which used to render the PDF as BILL OF SUPPLY despite the
+        # WhatsApp summary saying "Tax Invoice".
+        # If reg has a valid GSTIN and the shop doesn't, patch in memory
+        # and persist back to the Shop table so future bills are correct
+        # too.
+        if not pending.is_bill_of_supply and not shop.has_gstin:
+            reg_gstin = (reg.get("gstin") or "").upper().strip()
+            if reg_gstin and reg_gstin != PLACEHOLDER_GSTIN \
+                    and GSTIN_REGEX.match(reg_gstin):
+                log.warning(
+                    f"GSTIN desync detected | shop_id={pending.shop_id} | "
+                    f"shop.gstin={shop.gstin!r} | reg.gstin={reg_gstin!r} "
+                    f"| patching from Registration"
+                )
+                shop.gstin = reg_gstin
+                # Persist so future bills don't re-trigger the patch
+                try:
+                    with db_session() as s:
+                        row = s.query(Shop).filter_by(
+                            shop_id=pending.shop_id.upper()
+                        ).first()
+                        if row:
+                            row.gstin = reg_gstin
+                except Exception as exc:
+                    log.error(
+                        f"GSTIN sync persist failed | shop_id={pending.shop_id} "
+                        f"| error={exc}"
+                    )
+            else:
+                # Tax Invoice intent but NO GSTIN anywhere — that's a data
+                # integrity error. Log loudly; the PDF renderer's invariant
+                # check will surface it as a clear failure to the user
+                # rather than a silent BOS render.
+                log.error(
+                    f"Tax Invoice requested but no valid GSTIN found | "
+                    f"shop_id={pending.shop_id} | shop.gstin={shop.gstin!r} | "
+                    f"reg.gstin={reg.get('gstin')!r}"
+                )
 
         customer = CustomerInfo(
             name       = pending.customer_name,

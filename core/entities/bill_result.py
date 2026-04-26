@@ -23,3 +23,4 @@ class BillResult:
     discount_total:                float = 0.0           # actual ₹ amount deducted
     taxable_amount:                float = 0.0           # after all discounts
     needs_confirmation:            bool  = False
+    doc_type:                      str   = ""   # "TAX INVOICE" | "BILL OF SUPPLY" | "CREDIT NOTE"

@@ -1586,24 +1586,15 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
         _assert_bos_invariant(pending.items, pending.is_bill_of_supply)
         _assert_gst_data_present(pending.items)
 
-        items = []
-        for i in pending.items:
-            hsn = i.get("hsn") or ""
-            gst_rate_raw = i.get("gst_rate")
-            if not hsn or gst_rate_raw is None:
-                log.error(
-                    f"_generate_confirmed_bill: '{i['name']}' missing hsn={hsn!r} "
-                    f"or gst_rate={gst_rate_raw!r} — aborting bill generation"
-                )
-                raise ValueError("GST data missing in pending bill")
-            items.append(BillItem(
-                name=i["name"], qty=i["qty"], price=abs(i["price"]),
-                hsn=hsn, gst_rate=float(gst_rate_raw),
-                item_discount_type=i.get("item_discount_type", "none") or "none",
-                item_discount_value=float(i.get("item_discount_value", 0) or 0),
-            ))
+        items = _build_bill_items(pending)
 
         invoice_number = generate_invoice_number(pending.shop_id, is_return=pending.is_return)
+
+        bill_of_supply = pending.is_bill_of_supply
+        if not bill_of_supply and not shop.has_gstin:
+            send(from_number, "⚠️ GST bill cannot be generated because GSTIN is not set. Generating Bill of Supply instead.")
+            bill_of_supply = True
+
         pdf_data, bill_result = generate_pdf_bill(
             shop                = shop,
             customer            = customer,
@@ -1614,7 +1605,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             is_inclusive        = pending.is_inclusive,
             bill_discount_type  = pending.bill_discount_type or "none",
             bill_discount_value = float(pending.bill_discount_value or 0.0),
-            bill_of_supply      = pending.is_bill_of_supply,
+            bill_of_supply      = bill_of_supply,
         )
 
         # Save to database (retry once, warn user on failure)

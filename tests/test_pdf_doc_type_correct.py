@@ -258,3 +258,66 @@ def test_layout_invariant_rejects_doctype_drift_on_tax_invoice(monkeypatch):
     assert "bill_of_supply" in src and "parameter" in src.lower(), (
         "Docstring should explain the contract"
     )
+
+
+def test_no_gstin_anywhere_falls_back_to_bill_of_supply(monkeypatch):
+    """When shop has no valid GSTIN AND Registration also has none,
+    _generate_confirmed_bill must:
+      (a) send the GSTIN-missing warning to the user, and
+      (b) generate the bill as Bill of Supply (total_gst == 0 in DB).
+
+    Covers the new bill_of_supply override added in the GST bug fix.
+    """
+    from services.registration import activate_trial, get_registration
+    from services.pending import PendingBill, store_pending, clear_pending
+    from services.billing import _generate_confirmed_bill
+    from db.session import db_session
+    from db.models import Bill
+    import services.billing as billing_mod
+
+    sent_messages: list[str] = []
+    monkeypatch.setattr(billing_mod, "send",     lambda to, msg: sent_messages.append(msg) or True)
+    monkeypatch.setattr(billing_mod, "send_pdf", lambda *a, **kw: None)
+
+    phone = "whatsapp:+919000111102"
+    activate_trial(
+        phone, "No GSTIN Shop", "Hyderabad",
+        gstin="",
+        state_name="Telangana", state_code="36",
+    )
+    clear_pending(phone)
+    shop_id = "S" + "919000111102"[-8:]
+
+    reg = get_registration(phone) or {}
+
+    pending = PendingBill(
+        phone=phone, shop_id=shop_id, shop_name="No GSTIN Shop",
+        shop_state="Telangana", shop_state_code="36",
+        customer_name="Ramesh",
+        customer_state="Telangana", customer_state_code="36",
+        items=[{
+            "name": "shirt", "qty": 1, "price": 500,
+            "hsn": "6205", "gst_rate": 5,
+            "gst_source": "exact", "gst_confidence": "high",
+            "item_discount_type": "none", "item_discount_value": 0,
+        }],
+        confidence=1.0, warnings=[], raw_message="shirt 500",
+        created_at=datetime.utcnow(),
+        is_bill_of_supply=False,  # Tax Invoice INTENT — no GSTIN triggers fallback
+    )
+    store_pending(phone, pending)
+
+    _generate_confirmed_bill(phone, pending, reg, d_left=10)
+
+    # (a) Warning must have been sent.
+    assert any("GSTIN is not set" in m for m in sent_messages), (
+        f"Expected GSTIN warning in sent messages, got: {sent_messages!r}"
+    )
+
+    # (b) Bill saved as BOS — total_gst must be 0.
+    with db_session() as s:
+        bill = s.query(Bill).filter_by(shop_id=shop_id).first()
+    assert bill is not None, "Bill was not saved to DB"
+    assert bill.total_gst == 0.0, (
+        f"Expected BOS bill with total_gst=0, got {bill.total_gst}"
+    )

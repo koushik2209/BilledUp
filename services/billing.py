@@ -1651,7 +1651,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
                     pending.shop_id, item.name,
                     item.hsn, item.gst_rate,
                     confirmed=True,
-                    is_bos=pending.is_bill_of_supply,
+                    is_bos=bill_of_supply,
                 )
         except Exception as e:
             log.error(f"Item master save failed (non-fatal): {e}")
@@ -1672,12 +1672,12 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             customer_name     = pending.customer_name,
             days              = d_left,
             is_return         = pending.is_return,
-            is_bill_of_supply = pending.is_bill_of_supply,
+            is_bill_of_supply = bill_of_supply,
             customer_phone    = pending.customer_phone or "",
         )
         send(from_number, summary)
 
-        doc_label = "Credit Note" if pending.is_return else ("Bill of Supply" if pending.is_bill_of_supply else "Invoice")
+        doc_label = "Credit Note" if pending.is_return else ("Bill of Supply" if bill_of_supply else "Invoice")
         sign = "-" if pending.is_return else ""
         suffix = ''.join(random.choices(string.ascii_lowercase, k=3))
         send_pdf(

@@ -632,11 +632,26 @@ def _handle_update_item(
                 continue
             new_price = _safe_float(upd.get("price"), None)
             new_qty   = _safe_float(upd.get("qty"),   None)
+            new_gst   = _safe_float(upd.get("gst_rate"), None)
             if new_price and new_price > 0:
                 pending.items[idx]["price"] = new_price
             if new_qty and new_qty > 0:
                 pending.items[idx]["qty"] = new_qty
-            changed.append(pending.items[idx]["name"])
+            if new_gst is not None and new_gst >= 0:
+                valid_slabs = {0, 3, 5, 12, 18, 28}
+                if int(new_gst) in valid_slabs and idx < len(pending.items):
+                    item = pending.items[idx]
+                    if pending.is_bill_of_supply:
+                        item["original_gst"] = int(new_gst)
+                        item["gst_rate"] = 0
+                    else:
+                        item["gst_rate"] = int(new_gst)
+                        item["original_gst"] = int(new_gst)
+                    item["gst_source"] = "manual"
+                    if item["name"] not in changed:
+                        changed.append(item["name"])
+            if pending.items[idx]["name"] not in changed:
+                changed.append(pending.items[idx]["name"])
 
         # Also handle add_items that came along with update (RULE 9 multi-change)
         extra_adds = bill_changes.get("add_items") or []

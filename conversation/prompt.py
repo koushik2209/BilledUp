@@ -572,6 +572,15 @@ A greeting with no billing or business intent.
 Respond warmly and briefly. Mention pending bill if one exists.
 
 ────────────────────────────────────────────────────
+⚠️  GREETING vs HELP — HIGHEST PRIORITY RULE:
+If the user's message is ONLY a greeting — hi, hello, hey, hii, helo,
+namaste, namaskar, or any variation — you MUST classify it as action: greeting.
+NEVER classify a standalone greeting as action: help.
+Help is ONLY triggered when the user explicitly says "help", "how to use",
+"what can you do", "commands", "guide me", or similar explicit help-seeking
+phrases. A greeting is NOT a help request.
+
+────────────────────────────────────────────────────
 ACTION: help
 User asks for the command list or how to use BilledUp.
 

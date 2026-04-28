@@ -63,6 +63,9 @@ def _fallback_reply() -> str:
     )
 
 
+GREETING_WORDS = {"hi", "hii", "hello", "hey", "helo", "namaste", "namaskar", "sup", "hiya"}
+
+
 # ─────────────────────────────────────────────
 # Main Handler
 # ─────────────────────────────────────────────
@@ -205,6 +208,17 @@ def handle_message(from_number: str, message: str):
                 cleanup_expired_pending()
             except Exception as e:
                 log.warning(f"Pending cleanup failed: {e}")
+
+            # Greeting short-circuit — respond instantly, skip LLM
+            if msg_lower.strip() in GREETING_WORDS:
+                _safe_send(
+                    from_number,
+                    "Hey! 👋 Ready to bill?\n\n"
+                    "Send me items with prices — like\n"
+                    "*shirt 500 pant 600 for Ravi*\n\n"
+                    "Type *help* if you need guidance."
+                )
+                return
 
             # Conversational bot
             try:
